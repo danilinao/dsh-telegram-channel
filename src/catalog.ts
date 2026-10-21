@@ -253,10 +253,11 @@ export async function resolveSessionTitle(
   try {
     const raw = await call({ rpcId: randomUUID(), payload: { sessionId } })
     const value = unwrap<ProjectionBlock>(raw)
-    if (!value) return undefined
-    return projectionTitle({ projections: value })
+    // Any gap in the old route is answered by the host one.
+    if (!value) return await resolveSessionTitleFromHost(ctx, sessionId)
+    return projectionTitle({ projections: value }) ?? await resolveSessionTitleFromHost(ctx, sessionId)
   } catch {
-    return undefined
+    return await resolveSessionTitleFromHost(ctx, sessionId)
   }
 }
 
