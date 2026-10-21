@@ -104,9 +104,10 @@ function titleOf(summary: {
 }
 
 /** Cache of names recovered from on-disk session logs (cold sessions have no projections). */
+const logInfoCache = new Map<string, LogInfo>()
 const logTitleCache = new Map<string, string | undefined>()
 
-/** DSH stores sessions under `<home>/sessions/<escaped-cwd>/<bare-id>/session.v4.jsonl.zstd`. */
+/** DSH stores sessions under `<home>/sessions/<escaped-cwd>/<dir>/session.v4.jsonl.zstd`. */
 function escapeCwdForStore(cwd: string): string {
   const trimmed = cwd.replace(/\/+$/, '')
   let out = ''
@@ -116,6 +117,32 @@ function escapeCwdForStore(cwd: string): string {
     else out += `~${ch.codePointAt(0)!.toString(16).padStart(4, '0')}`
   }
   return `--${out.replace(/^-+/, '')}--`
+}
+
+/**
+ * Locate a session log file. Some stores name the directory `<uuid>`, others
+ * `session-<uuid>`, so both spellings are probed — this was why half the
+ * Synthriders rows had no recoverable name.
+ */
+export function sessionLogFile(sessionId: string, cwd?: string): string | undefined {
+  const bare = normalizeSessionId(sessionId)
+  const home = process.env.DSH_HOME ?? join(homedir(), '.dsh')
+  const root = join(home, 'sessions')
+  const names = [bare, `session-${bare}`]
+  const dirs: string[] = []
+  if (cwd) dirs.push(join(root, escapeCwdForStore(cwd)))
+  try {
+    for (const dir of readdirSync(root)) dirs.push(join(root, dir))
+  } catch {
+    // no sessions dir
+  }
+  for (const dir of dirs) {
+    for (const name of names) {
+      const file = join(dir, name, 'session.v4.jsonl.zstd')
+      if (existsSync(file)) return file
+    }
+  }
+  return undefined
 }
 
 /** Text of a message content payload: string parts joined, other blocks skipped. */
@@ -130,11 +157,25 @@ function textOfContent(content: unknown): string {
   return parts.join('\n')
 }
 
-function firstUserTextFromLog(file: string): string | undefined {
+interface LogInfo {
+  title?: string
+  /** false when the log carries no user message at all — a blank session. */
+  hasUserMessage: boolean
+  mtime?: number
+}
+
+function firstUserTextFromLog(file: string): LogInfo {
+  let mtime: number | undefined
+  try {
+    mtime = statSync(file).mtimeMs
+  } catch {
+    mtime = undefined
+  }
   try {
     const zstd = (nodeZlib as unknown as { zstdDecompressSync?: (buf: Buffer) => Buffer }).zstdDecompressSync
-    if (typeof zstd !== 'function') return undefined
+    if (typeof zstd !== 'function') return { hasUserMessage: false, mtime }
     const raw = zstd(readFileSync(file)).toString('utf8')
+    let sawUserMessage = false
     for (const line of raw.split('\n')) {
       if (!line.trim()) continue
       let event: { type?: string; data?: { source?: { kind?: string }; content?: unknown; message?: { content?: unknown } } }
@@ -145,17 +186,19 @@ function firstUserTextFromLog(file: string): string | undefined {
       }
       if (event.type !== 'user/message') continue
       if (event.data?.source?.kind !== undefined && event.data.source.kind !== 'user') continue
+      sawUserMessage = true
       const text = textOfContent(event.data?.message?.content ?? event.data?.content)
       const flat = text.replace(/\s+/g, ' ').trim()
       if (flat) {
         const chars = [...flat]
-        return chars.length > 60 ? `${chars.slice(0, 59).join('')}…` : flat
+        return { title: chars.length > 60 ? `${chars.slice(0, 59).join('')}…` : flat, hasUserMessage: true, mtime }
       }
     }
+    return { hasUserMessage: sawUserMessage, mtime }
   } catch {
     // unreadable / unsupported log — the caller falls back further
+    return { hasUserMessage: false, mtime }
   }
-  return undefined
 }
 
 /**
@@ -163,31 +206,18 @@ function firstUserTextFromLog(file: string): string | undefined {
  * projections, so this is what turns "Synthriders" (the project) into the real
  * first message of each session.
  */
-export function readTitleFromSessionLog(sessionId: string, cwd?: string): string | undefined {
+export function sessionLogInfo(sessionId: string, cwd?: string): LogInfo {
   const bare = normalizeSessionId(sessionId)
-  if (logTitleCache.has(bare)) return logTitleCache.get(bare)
-  const home = process.env.DSH_HOME ?? join(homedir(), '.dsh')
-  const root = join(home, 'sessions')
-  const candidates: string[] = []
-  if (cwd) candidates.push(join(root, escapeCwdForStore(cwd), bare, 'session.v4.jsonl.zstd'))
-  try {
-    for (const dir of readdirSync(root)) {
-      const file = join(root, dir, bare, 'session.v4.jsonl.zstd')
-      if (!candidates.includes(file)) candidates.push(file)
-    }
-  } catch {
-    // no sessions dir — nothing to recover
-  }
-  for (const file of candidates) {
-    if (!existsSync(file)) continue
-    const title = firstUserTextFromLog(file)
-    if (title) {
-      logTitleCache.set(bare, title)
-      return title
-    }
-  }
-  logTitleCache.set(bare, undefined)
-  return undefined
+  const cached = logInfoCache.get(bare)
+  if (cached) return cached
+  const file = sessionLogFile(sessionId, cwd)
+  const info: LogInfo = file ? firstUserTextFromLog(file) : { hasUserMessage: false }
+  logInfoCache.set(bare, info)
+  return info
+}
+
+export function readTitleFromSessionLog(sessionId: string, cwd?: string): string | undefined {
+  return sessionLogInfo(sessionId, cwd).title
 }
 
 /** Name straight out of DSH projections: the title, else the first user message. */
@@ -446,6 +476,16 @@ export async function resolveSessionTitle(
   }
 }
 
+function logMtime(sessionId: string, cwd?: string): number | undefined {
+  const file = sessionLogFile(sessionId, cwd)
+  if (!file) return undefined
+  try {
+    return statSync(file).mtimeMs
+  } catch {
+    return undefined
+  }
+}
+
 /**
  * Catalog read straight from the DSH store on disk.
  *
@@ -532,7 +572,7 @@ export function loadCatalogFromDisk(ctx: Context): CatalogSnapshot | undefined {
         cwd: row.path,
         blank: false,
         running,
-        updatedAt: hit?.at ?? 0,
+        updatedAt: hit?.at ?? logMtime(sessionId, row.path) ?? 0,
       })
     }
     workspaces.push({

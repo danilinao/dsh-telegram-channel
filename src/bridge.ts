@@ -15,6 +15,7 @@ import {
   hostService,
   isArchived,
   resolveSessionTitle,
+  sessionLogInfo,
   shortWhen as shortWhenLocal,
   loadCatalog,
   truncateButton,
@@ -917,7 +918,12 @@ export class TelegramBridge {
         return
       }
       const title = await resolveSessionTitle(this.ctx, row.sessionId, row.cwd)
-      if (!title) return
+      if (!title) {
+        // No name anywhere: if the log carries no user message at all, the
+        // session is empty — hide it instead of showing an id tail.
+        if (!row.named && !sessionLogInfo(row.sessionId, row.cwd).hasUserMessage) row.blank = true
+        return
+      }
       this.titleCache.set(row.sessionId, { at: row.updatedAt, title })
       row.title = title
       row.named = true
@@ -938,8 +944,12 @@ export class TelegramBridge {
     const sessions = visibleSessionsForWorkspace(catalog, workspace)
       .slice()
       .sort((a, b) => b.updatedAt - a.updatedAt)
-    const shown = sessions.slice(0, MAX_BUTTONS)
-    await this.ensureSessionNames(shown)
+    const shownRaw = sessions.slice(0, MAX_BUTTONS)
+    await this.ensureSessionNames(shownRaw)
+    const shown = shownRaw.filter((row) => !row.blank)
+    const hiddenEmpty = shownRaw.length - shown.length
+    sessions.length = 0
+    sessions.push(...shown)
     this.pickers.set(String(chatId), { workspaces, workspaceIndex, sessions: shown, catalog })
     const archivedCount = workspace.sessionIds
       .filter((sid) => isArchived(catalog.archivedIds, sid))
@@ -979,6 +989,7 @@ export class TelegramBridge {
         return `${i + 1}. ${row.title}${when ? ` — ${when}` : ''}\n   ${mark} · …${row.sessionId.slice(-8)}`
       }),
       sessions.length > MAX_BUTTONS ? `Показаны первые ${MAX_BUTTONS}.` : '',
+      hiddenEmpty > 0 ? `Скрыто пустых сессий: ${hiddenEmpty}.` : '',
       '',
       'Кнопка привязывает сессию; 🗄 убирает её в архив.',
     ].filter(Boolean).join('\n')
@@ -1003,8 +1014,9 @@ export class TelegramBridge {
       else rows.push({ sessionId: sid, title: `сессия …${sid.slice(-8)}`, named: false, blank: false, running: false, updatedAt: 0 })
     }
     rows.sort((a, b) => b.updatedAt - a.updatedAt)
-    const shown = rows.slice(0, MAX_BUTTONS)
-    await this.ensureSessionNames(shown)
+    const shownRaw = rows.slice(0, MAX_BUTTONS)
+    await this.ensureSessionNames(shownRaw)
+    const shown = shownRaw.filter((row) => !row.blank)
     this.pickers.set(String(chatId), { workspaces, workspaceIndex, sessions: shown, catalog })
     const keyboard: InlineKeyboardMarkup = {
       inline_keyboard: [
