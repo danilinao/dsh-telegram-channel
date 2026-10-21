@@ -29,9 +29,17 @@ upstream  https://github.com/hi-wenw/dsh-telegram-channel.git
    модели и создание сессий идут через хост-сервисы, которыми пользуется сам Web UI:
    `workspaceRegistry` (порядок областей + архив), `sessionController.list()` (все
    сессии с проекциями), `sessionController.modelCatalog()` /
-   `selectModel()` (модели) и `create()` (`/new`). Путь через `apiProxy` сохранён
-   для старых хостов и используется, если сервис доступен. Отправка изображений
-   пока остаётся на `apiProxy` — на 0.2 недоступна (известное ограничение).
+   `selectModel()` (модели), `create()` (`/new`) и `prompt()` (картинки). Путь
+   через `apiProxy` сохранён для старых хостов и используется, если сервис доступен.
+5. **Управление проектами и сессиями с телефона.** Список областей показывает все
+   проекты, включая пустые; в пустой области создаётся сессия. `/newproject`
+   добавляет папку через `workspaceRegistry.create`, 🗄/`/archive` убирают сессию
+   через `workspaceRegistry.archiveSession(id, { stopActivity: true })`.
+6. **Уведомления о состоянии.** `turn/end` разбирается по причине: `completed`
+   (✅), `error` (текст + подсказка по коду/тексту), `max-tokens`, `blocked`,
+   `aborted`, `interrupted`; вопрос агента приходит как «❓ Сессия задала вопрос и
+   ждёт ответа». Режим на чат: `/notify on | errors | off` (хранится вместе с
+   привязками в `telegram-channel-bindings.json`).
 
 Код: `src/catalog.ts` (`normalizeSessionId`, `isArchived`, `loadCatalogFromHost`,
 `resolveSessionTitle`), `src/bridge.ts` (`sessionButtonText`, `ensureSessionNames`),

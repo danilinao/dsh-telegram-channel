@@ -12,6 +12,10 @@ export const MSG = {
     '/status — состояние: привязка, ID сессии, рабочая область, модель, глубина размышлений, контекст, токены',
     '/compact — сжать историю сессии (сократить контекст; только когда сессия свободна)',
     '/rich — режим рендера: on=rich (нужен свежий клиент) / off=HTML (по умолчанию); запоминается для этого чата',
+    '/newproject <путь> [ | Название] — добавить папку как проект (рабочую область)',
+    '/archive — убрать привязанную сессию в архив (работа останавливается)',
+    '/notify on|errors|off — какие уведомления присылать: всё / только ошибки / ничего',
+    '/projects — список проектов и сессий (то же, что /sessions)',
     '/unbind — отвязать телефон (сессия на компьютере продолжает работать)',
     '/help — помощь',
     '',
@@ -57,6 +61,40 @@ export const MSG = {
     const tip = 'Сжатие не удалось.'
     if (!detail) return tip
     return `${tip}\nПодробности: ${detail}`
+  },
+  ARCHIVE_USAGE: 'Использование: /archive — убрать текущую сессию в архив (из меню и из Web она исчезнет, работа останавливается)',
+  ARCHIVE_NONE: 'Сейчас нет привязанной сессии — архивировать нечего.',
+  ARCHIVE_DONE(label: string): string {
+    return `Сессия в архиве: ${label}\nПривязка снята. Вернуть из архива можно в Web.`
+  },
+  ARCHIVE_FAILED(detail?: string): string {
+    const tip = 'Не удалось архивировать сессию.'
+    if (!detail) return tip
+    return `${tip}\nПодробности: ${detail}`
+  },
+  NOTIFY_USAGE: 'Использование: /notify on — все события, /notify errors — только ошибки, /notify off — выключить',
+  NOTIFY_STATE(mode: 'all' | 'errors' | 'off'): string {
+    const human = mode === 'all' ? 'все события (старт/успех/ошибка/вопрос)' : mode === 'errors' ? 'только ошибки и обрывы' : 'выключены'
+    return `Уведомления в этом чате: ${human}.\nПоменять: /notify on | errors | off`
+  },
+  NOTIFY_SET(mode: 'all' | 'errors' | 'off'): string {
+    const human = mode === 'all' ? 'все события' : mode === 'errors' ? 'только ошибки' : 'выключены'
+    return `Готово, уведомления: ${human}.`
+  },
+  NEWPROJECT_USAGE: 'Использование: /newproject <путь к папке> [ | Название]\nПример: /newproject /home/alexey/projects/my-game | My Game',
+  NEWPROJECT_PROMPT: 'Отправьте путь к папке проекта. Можно с названием: /home/alexey/projects/my-game | My Game',
+  NEWPROJECT_CREATED(title: string, path: string): string {
+    return `Проект добавлен: ${title}\n${path}\nОткрыть его сессии: /sessions`
+  },
+  NEWPROJECT_FAILED(detail?: string): string {
+    const tip = 'Не удалось добавить проект.'
+    if (!detail) return tip
+    return `${tip}\nПодробности: ${detail}`
+  },
+  NEWPROJECT_CANCELLED: 'Добавление проекта отменено.',
+  NO_PROJECTS: 'В реестре пока нет ни одной рабочей области. Создайте первую: /newproject <путь к папке>',
+  NO_SESSIONS_IN_WS_EMPTY(title: string): string {
+    return `В рабочей области «${title}» пока нет сессий — можно создать новую кнопкой ниже.`
   },
   GONE: 'Привязанная сессия больше недоступна. Отправьте /sessions заново.',
   MEDIA_UNSUPPORTED: 'Этот тип сообщения пока не поддерживается (текст и картинки png/jpeg/webp/gif; голос, видео и файлы — через Web).',
@@ -116,6 +154,10 @@ export type ParsedCommand =
   | { type: 'mission'; text: string }
   | { type: 'new'; text: string }
   | { type: 'cancel'; text: string }
+  | { type: 'archive'; text: string }
+  | { type: 'notify'; text: string; arg?: string }
+  | { type: 'newproject'; text: string; arg?: string }
+  | { type: 'projects'; text: string }
   | { type: 'unknown'; command: string; text: string }
   | { type: 'plain'; text: string }
 
@@ -160,6 +202,18 @@ export function parseCommand(text: string): ParsedCommand {
       return { type: 'new', text }
     case '/cancel':
       return { type: 'cancel', text }
+    case '/archive':
+    case '/arch':
+      return { type: 'archive', text }
+    case '/notify':
+    case '/notifications':
+      return { type: 'notify', text, arg: text.split(/\s+/)[1]?.toLowerCase() }
+    case '/newproject':
+    case '/project':
+      return { type: 'newproject', text, arg: text.split(/\s+/).slice(1).join(' ') }
+    case '/projects':
+    case '/workspaces':
+      return { type: 'projects', text }
     default:
       return { type: 'unknown', command, text }
   }

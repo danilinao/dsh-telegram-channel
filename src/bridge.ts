@@ -17,7 +17,6 @@ import {
   loadCatalog,
   truncateButton,
   visibleSessionsForWorkspace,
-  workspacesWithVisibleSessions,
   type CatalogSnapshot,
   type SessionRow,
   type WorkspaceRow,
@@ -67,6 +66,8 @@ interface Binding {
 
 interface PickerState {
   workspaces: WorkspaceRow[]
+  /** индекс области, чьи сессии сейчас показаны (для кнопок создания/архива) */
+  workspaceIndex?: number
   sessions: SessionRow[]
   catalog?: CatalogSnapshot
   models?: ModelOption[]
@@ -194,6 +195,12 @@ const MODEL_CB = 'mdl:'
 /** Use eff: (not me:) — short prefix, no collision with other callbacks. */
 const EFFORT_CB = 'eff:'
 const BACK_MODEL_CB = 'mb'
+/** Архивировать сессию из пикера: arc:<индекс в списке>. */
+const ARC_CB = 'arc:'
+/** Создать сессию в области: ns:<индекс области>. */
+const NEW_SID_CB = 'ns:'
+/** «Новый проект»: плагин ждёт путь следующим сообщением. */
+const NEW_WS_CB = 'nw'
 const MAX_BUTTONS = 40
 
 function lastContextKeyboard(): InlineKeyboardMarkup {
@@ -242,6 +249,10 @@ export class TelegramBridge {
   private readonly pickers = new Map<string, PickerState>()
   /** Session names fetched from host projections, keyed by id and updatedAt. */
   private readonly titleCache = new Map<string, { at: number; title: string }>()
+  /** chatId → ждём путь нового проекта следующим сообщением. */
+  private readonly pendingProject = new Set<number>()
+  /** chatId → какие события присылать: всё, только ошибки или ничего. */
+  private readonly notifyPrefs = new Map<string, 'all' | 'errors' | 'off'>()
   /** chatId → model awaiting reasoning-effort pick (kept outside picker so list refreshes won't drop it). */
   private readonly pendingModels = new Map<string, ModelOption>()
   private polling = false
@@ -327,6 +338,9 @@ export class TelegramBridge {
       { command: 'stop', description: 'Прервать текущую задачу' },
       { command: 'mission', description: 'Список задач и прогресс' },
       { command: 'new', description: 'Новый диалог в этой области и привязка' },
+      { command: 'newproject', description: 'Добавить папку как проект' },
+      { command: 'archive', description: 'Убрать сессию в архив' },
+      { command: 'notify', description: 'Уведомления: on / errors / off' },
       { command: 'cancel', description: 'Закрыть ответы/подтверждения в TG' },
       { command: 'help', description: 'Помощь' },
     ]).then(() => {
@@ -426,6 +440,19 @@ export class TelegramBridge {
       return
     }
 
+    // «Новый проект» ждёт путь. Абсолютный путь начинается с «/», поэтому
+    // здесь текст не разбирается как команда — исключение только /cancel.
+    if (this.pendingProject.has(chatId)) {
+      this.pendingProject.delete(chatId)
+      const answer = message.text.trim()
+      if (answer === '/cancel') {
+        await this.client.sendMessage(chatId, MSG.NEWPROJECT_CANCELLED)
+        return
+      }
+      await this.createWorkspaceFromText(chatId, message.text)
+      return
+    }
+
     const parsed = parseCommand(message.text)
     switch (parsed.type) {
       case 'start':
@@ -467,6 +494,22 @@ export class TelegramBridge {
         return
       case 'new':
         await this.newSessionHere(chatId)
+        return
+      case 'archive':
+        await this.archiveBound(chatId)
+        return
+      case 'notify':
+        await this.handleNotifyCommand(chatId, parsed.arg)
+        return
+      case 'newproject':
+        if (!parsed.arg || !parsed.arg.trim()) {
+          await this.client.sendMessage(chatId, MSG.NEWPROJECT_PROMPT)
+          return
+        }
+        await this.createWorkspaceFromText(chatId, parsed.arg)
+        return
+      case 'projects':
+        await this.sendWorkspacePicker(chatId)
         return
       case 'cancel': {
         // /cancel closes the TG-side answer/approval channel; the UI side stays open.
@@ -548,6 +591,40 @@ export class TelegramBridge {
       await this.bindSession(chatId, cq.id, row)
       return
     }
+    if (data === NEW_WS_CB) {
+      await this.client.answerCallbackQuery(cq.id, 'Жду путь к папке')
+      this.pendingProject.add(chatId)
+      await this.client.sendMessage(chatId, MSG.NEWPROJECT_PROMPT)
+      return
+    }
+    if (data.startsWith(NEW_SID_CB)) {
+      const index = Number(data.slice(NEW_SID_CB.length))
+      const ws = picker?.workspaces?.[index] ?? (await this.resolveCatalog()).workspaces[index]
+      if (!ws) {
+        await this.client.answerCallbackQuery(cq.id, 'Область устарела')
+        await this.client.sendMessage(chatId, MSG.PICKER_STALE)
+        return
+      }
+      await this.client.answerCallbackQuery(cq.id, 'Создаю сессию')
+      await this.createSessionInTarget(chatId, { workspaceId: ws.id })
+      return
+    }
+    if (data.startsWith(ARC_CB)) {
+      const index = Number(data.slice(ARC_CB.length))
+      const row = picker?.sessions[index]
+      if (!row) {
+        await this.client.answerCallbackQuery(cq.id, 'Сессия устарела')
+        await this.client.sendMessage(chatId, MSG.PICKER_STALE)
+        return
+      }
+      await this.client.answerCallbackQuery(cq.id, 'В архив')
+      const archived = await this.archiveSessionById(chatId, row.sessionId, row.title)
+      if (archived) {
+        const wsIndex = picker?.workspaceIndex
+        await this.sendSessionPicker(chatId, wsIndex ?? 0)
+      }
+      return
+    }
     if (data.startsWith(MODEL_CB)) {
       const index = Number(data.slice(MODEL_CB.length))
       const option = picker?.models?.[index]
@@ -618,32 +695,36 @@ export class TelegramBridge {
 
   private async sendWorkspacePicker(chatId: number, existing?: CatalogSnapshot): Promise<void> {
     const catalog = existing ?? await this.resolveCatalog()
-    const workspaces = workspacesWithVisibleSessions(catalog)
+    // Все области реестра, включая пустые: в пустой можно сразу создать сессию.
+    const workspaces = catalog.workspaces
     if (workspaces.length === 0) {
       this.pickers.delete(String(chatId))
-      await this.client.sendMessage(chatId, MSG.NO_SESSIONS)
+      await this.client.sendMessage(chatId, MSG.NO_PROJECTS)
       return
     }
     const shown = workspaces.slice(0, MAX_BUTTONS)
     this.pickers.set(String(chatId), { workspaces: shown, sessions: [], catalog })
     const keyboard: InlineKeyboardMarkup = {
-      inline_keyboard: shown.map((ws, i) => ([{
-        text: truncateButton(`${i + 1}. ${ws.title}`),
-        callback_data: `${WS_CB}${i}`,
-      }])),
+      inline_keyboard: [
+        ...shown.map((ws, i) => ([{
+          text: truncateButton(`${i + 1}. ${ws.title}`),
+          callback_data: `${WS_CB}${i}`,
+        }])),
+        [{ text: '➕ Новый проект', callback_data: NEW_WS_CB }],
+      ],
     }
     const body = [
       catalog.complete
-        ? `Выберите рабочую область (${workspaces.length}, как в Web, без архива):`
-        : `Выберите рабочую область (${workspaces.length}) ⚠️ только запущенные сессии (apiProxy не готов; полный список — плагин ≥0.3.2 и перезапуск dsh web):`,
+        ? `Выберите рабочую область (${workspaces.length}, как в Web; архивные сессии скрыты):`
+        : `Выберите рабочую область (${workspaces.length}) ⚠️ хост не отдал каталог: видны только запущенные сессии`,
       '',
       ...shown.map((ws, i) => {
         const n = visibleSessionsForWorkspace(catalog, ws).length
-        return `${i + 1}. ${ws.title}\n   ${ws.path}\n   сессий: ${n}`
+        return `${i + 1}. ${ws.title}${n === 0 ? ' — сессий нет' : ''}\n   ${ws.path}\n   сессий: ${n}`
       }),
       workspaces.length > MAX_BUTTONS ? `\nПоказаны первые ${MAX_BUTTONS} рабочих областей.` : '',
       '',
-      'Нажмите кнопку ниже, чтобы открыть сессии этой области.',
+      'Кнопка области открывает её сессии; в пустой области можно создать новую. «➕ Новый проект» добавляет папку в реестр.',
     ].filter(Boolean).join('\n')
     await this.client.sendMessage(chatId, body, undefined, keyboard)
   }
@@ -688,7 +769,7 @@ export class TelegramBridge {
     const catalog = picker?.catalog ?? await this.resolveCatalog()
     const workspaces = picker?.workspaces?.length
       ? picker.workspaces
-      : workspacesWithVisibleSessions(catalog)
+      : catalog.workspaces
     const workspace = workspaces[workspaceIndex]
     if (!workspace) {
       await this.client.sendMessage(chatId, MSG.PICKER_STALE)
@@ -697,21 +778,28 @@ export class TelegramBridge {
     const sessions = visibleSessionsForWorkspace(catalog, workspace)
       .slice()
       .sort((a, b) => b.updatedAt - a.updatedAt)
-    if (sessions.length === 0) {
-      await this.client.sendMessage(chatId, MSG.NO_SESSIONS_IN_WS(workspace.title))
-      return
-    }
     const shown = sessions.slice(0, MAX_BUTTONS)
     await this.ensureSessionNames(shown)
-    this.pickers.set(String(chatId), { workspaces, sessions: shown, catalog })
+    this.pickers.set(String(chatId), { workspaces, workspaceIndex, sessions: shown, catalog })
     const keyboard: InlineKeyboardMarkup = {
       inline_keyboard: [
-        ...shown.map((row, i) => ([{
-          text: truncateButton(this.sessionButtonText(row, i)),
-          callback_data: `${SID_CB}${i}`,
-        }])),
+        ...shown.map((row, i) => ([
+          { text: truncateButton(this.sessionButtonText(row, i)), callback_data: `${SID_CB}${i}` },
+          { text: '🗄', callback_data: `${ARC_CB}${i}` },
+        ])),
+        [{ text: '➕ Новая сессия здесь', callback_data: `${NEW_SID_CB}${workspaceIndex}` }],
         [{ text: '← К областям', callback_data: BACK_WS_CB }],
       ],
+    }
+    if (sessions.length === 0) {
+      const body = [
+        `Рабочая область: ${workspace.title}`,
+        workspace.path,
+        '',
+        MSG.NO_SESSIONS_IN_WS_EMPTY(workspace.title),
+      ].join('\n')
+      await this.client.sendMessage(chatId, body, undefined, keyboard)
+      return
     }
     const body = [
       `Рабочая область: ${workspace.title}`,
@@ -725,7 +813,7 @@ export class TelegramBridge {
       }),
       sessions.length > MAX_BUTTONS ? `\nПоказаны первые ${MAX_BUTTONS} сессий.` : '',
       '',
-      'Нажмите кнопку, чтобы привязать; неактивная сессия поднимется автоматически (Web не закрывается).',
+      'Нажмите кнопку, чтобы привязать; неактивная сессия поднимется автоматически. 🗄 — убрать сессию в архив.',
     ].filter(Boolean).join('\n')
     await this.client.sendMessage(chatId, body, undefined, keyboard)
   }
@@ -1232,13 +1320,39 @@ export class TelegramBridge {
       return
     }
     const proxy = resolveApiProxy(this.ctx)
-    if (!proxy?.sessions?.prompt) {
-      await this.enqueueNotice(chatId, 'Хост не поддерживает sessions.prompt — отправить изображение нельзя.')
+    const controller = hostService<{
+      prompt?: (request: {
+        requestId: string
+        sessionId: string
+        mode: 'queue' | 'steer'
+        content: WireContentPart[]
+      }) => Promise<{ accepted?: boolean }>
+    }>(this.ctx, 'sessionController')
+    const hostPrompt = controller?.prompt
+    if (!proxy?.sessions?.prompt && typeof hostPrompt !== 'function') {
+      await this.enqueueNotice(chatId, 'Хост не поддерживает отправку изображений (нет ни apiProxy.sessions.prompt, ни sessionController.prompt).')
       return
     }
     const busy = this.busySessions.has(binding.sessionId)
       || Boolean((agent as { phase?: { kind?: string } }).phase?.kind
         && (agent as { phase?: { kind?: string } }).phase?.kind !== 'idle')
+    // dsh 0.2: no apiProxy — the host session controller takes the same payload.
+    if (!proxy?.sessions?.prompt) {
+      try {
+        const accepted = await hostPrompt!.call(controller, {
+          requestId: randomUUID(),
+          sessionId: binding.sessionId,
+          mode: 'queue',
+          content: parts,
+        })
+        if (!accepted?.accepted) throw new Error('хост не подтвердил приём')
+      } catch (err) {
+        await this.enqueueNotice(chatId, MSG.IMAGE_FAILED(this.redact(err)))
+        return
+      }
+      if (busy) await this.enqueueNotice(chatId, 'В очереди: сообщение обработается после текущей задачи')
+      return
+    }
     type PromptResponse = { result?: { ok?: boolean; value?: { accepted?: boolean }; error?: { code?: string; message?: string; details?: { reason?: string } } } }
     let res: PromptResponse | undefined
     try {
@@ -1339,17 +1453,23 @@ export class TelegramBridge {
       // visible on the phone — previously they ended in silence.
       const reason = event.data?.reason as { kind?: string; error?: { message?: string; code?: string }; reason?: { kind?: string } } | undefined
       const kind = reason?.kind
-      if (kind === 'error') {
-        const detail = String(reason?.error?.message ?? reason?.error?.code ?? '').replace(/\s+/g, ' ').slice(0, 300)
-        for (const b of targets)
-          this.enqueueNotice(b.chatId, `Ход прерван из-за ошибки (API/внутренняя)${detail ? `：${detail}` : ''}`)
-      } else if (kind === 'aborted') {
-        const manual = reason?.reason?.kind === 'user'
-        for (const b of targets)
-          this.enqueueNotice(b.chatId, manual ? 'Ход остановлен вручную' : 'Ход прерван')
-      } else if (kind === 'interrupted') {
-        for (const b of targets)
-          this.enqueueNotice(b.chatId, 'Сессия пережила аварийное завершение (восстановление после сбоя) — ход помечен как прерванный')
+      for (const b of targets) {
+        const mode = this.notificationMode(b.chatId)
+        if (mode === 'off') continue
+        if (kind === 'error') {
+          this.enqueueNotice(b.chatId, this.describeTurnError(reason?.error))
+        } else if (kind === 'completed') {
+          if (mode === 'all') this.enqueueNotice(b.chatId, '✅ Сессия завершила работу')
+        } else if (kind === 'max-tokens') {
+          this.enqueueNotice(b.chatId, '⚠️ Достигнут лимит выходных токенов — ход закрыт')
+        } else if (kind === 'blocked') {
+          this.enqueueNotice(b.chatId, '⛔ Ход заблокирован хостом (сессия в архиве или работа остановлена)')
+        } else if (kind === 'aborted') {
+          const manual = reason?.reason?.kind === 'user'
+          if (mode === 'all') this.enqueueNotice(b.chatId, manual ? '⏹ Ход остановлен вручную' : '⏹ Ход прерван')
+        } else if (kind === 'interrupted') {
+          this.enqueueNotice(b.chatId, '⚠️ Сессия оборвалась: аварийное завершение (восстановление после сбоя), ход помечен прерванным')
+        }
       }
       return
     }
@@ -1680,7 +1800,7 @@ export class TelegramBridge {
   }
 
   private formatAskPending(questions: TgQuestionItem[]): string {
-    const lines = ['Ждут ответа (ответьте буквой варианта или введите свой ответ; /cancel — закрыть ответы в TG)']
+    const lines = ['❓ Сессия задала вопрос и ждёт ответа', 'Ответьте буквой варианта или введите свой ответ; /cancel — закрыть ответы в TG']
     questions.forEach((q, i) => {
       const prefix = questions.length > 1 ? `Q${i + 1}. ` : ''
       lines.push(`${prefix}${q.question ?? ''}`)
@@ -1886,8 +2006,22 @@ export class TelegramBridge {
     } catch {
       // Catalog unavailable → fall back to the host default workspace.
     }
+    await this.createSessionInTarget(chatId, { workspaceId, cwd: fallbackCwd })
+  }
+
+  /**
+   * Create a session in a workspace (or a directory) and bind the chat to it.
+   * Works on both host generations: `sessionController.create` on DSH 0.2 and
+   * `apiProxy.sessions.create` on 0.1.x.
+   */
+  private async createSessionInTarget(
+    chatId: number,
+    target: { workspaceId?: string; cwd?: string },
+  ): Promise<void> {
     const proxy = resolveApiProxy(this.ctx)
-    const payload = workspaceId !== undefined ? { workspaceId } : (fallbackCwd ? { cwd: fallbackCwd } : {})
+    const payload = target.workspaceId !== undefined
+      ? { workspaceId: target.workspaceId }
+      : (target.cwd ? { cwd: target.cwd } : {})
     let newId: string | undefined
     if (!proxy?.sessions?.create) {
       // dsh 0.2: no apiProxy — `sessionController.create` is the host's own route.
@@ -1926,13 +2060,152 @@ export class TelegramBridge {
     }
     const stale = this.pendingAsks.get(String(chatId))
     if (stale && stale.sessionId !== String(newId)) this.pendingAsks.delete(String(chatId))
-    this.bindings.set(String(chatId), { chatId, sessionId: String(newId), label: binding.label })
+    const label = target.workspaceId !== undefined
+      ? (this.pickers.get(String(chatId))?.workspaces.find((w) => w.id === target.workspaceId)?.title ?? 'новая сессия')
+      : (target.cwd ?? 'новая сессия')
+    this.bindings.set(String(chatId), { chatId, sessionId: String(newId), label })
     this.saveBindings()
-    const where = workspaceId !== undefined ? 'текущая рабочая область' : (fallbackCwd ? `каталог ${fallbackCwd}` : 'рабочая область по умолчанию')
+    const where = target.workspaceId !== undefined
+      ? `рабочая область ${label}`
+      : (target.cwd ? `каталог ${target.cwd}` : 'рабочая область по умолчанию')
     await this.client.sendMessage(chatId, `Новый диалог создан и привязан (${where}):\n${String(newId)}\nПросто отправьте сообщение`)
   }
 
-  // ── Binding persistence (survives hot reload / restart) ──
+  /** /newproject: add a directory to the workspace registry (DSH 0.2). */
+  private async createWorkspaceFromText(chatId: number, raw: string): Promise<void> {
+    const text = raw.trim()
+    if (!text) {
+      await this.client.sendMessage(chatId, MSG.NEWPROJECT_USAGE)
+      return
+    }
+    const sep = text.indexOf(' | ')
+    const pathPart = (sep >= 0 ? text.slice(0, sep) : text).trim()
+    const titlePart = sep >= 0 ? text.slice(sep + 3).trim() : ''
+    if (!pathPart) {
+      await this.client.sendMessage(chatId, MSG.NEWPROJECT_USAGE)
+      return
+    }
+    const registry = hostService<{
+      create?: (path: string, title?: string) => Promise<{ id?: string; path?: string; title?: string }>
+    }>(this.ctx, 'workspaceRegistry')
+    if (typeof registry?.create !== 'function') {
+      await this.client.sendMessage(
+        chatId,
+        MSG.NEWPROJECT_FAILED('хост не умеет создавать рабочие области (нет workspaceRegistry)'),
+      )
+      return
+    }
+    try {
+      const created = await registry.create.call(registry, pathPart, titlePart || undefined)
+      this.pickers.delete(String(chatId))
+      await this.client.sendMessage(
+        chatId,
+        MSG.NEWPROJECT_CREATED(created?.title ?? titlePart ?? pathPart, created?.path ?? pathPart),
+      )
+    } catch (err) {
+      await this.client.sendMessage(chatId, MSG.NEWPROJECT_FAILED(this.redact(err)))
+    }
+  }
+
+  /** /archive: move the bound session to the archive and unbind the chat. */
+  private async archiveBound(chatId: number): Promise<void> {
+    const binding = this.bindings.get(String(chatId))
+    if (!binding) {
+      await this.client.sendMessage(chatId, MSG.ARCHIVE_NONE)
+      return
+    }
+    await this.archiveSessionById(chatId, binding.sessionId, binding.label)
+  }
+
+  /**
+   * Archive one session through the host registry. `stopActivity` is requested
+   * so a running session is stopped instead of being refused: an archived
+   * session must not keep burning tokens.
+   */
+  private async archiveSessionById(
+    chatId: number,
+    sessionId: string,
+    label?: string,
+  ): Promise<boolean> {
+    const registry = hostService<{
+      archiveSession?: (id: string, options?: { stopActivity?: boolean }) => Promise<void>
+    }>(this.ctx, 'workspaceRegistry')
+    const call = registry?.archiveSession
+    if (typeof call !== 'function') {
+      await this.client.sendMessage(
+        chatId,
+        MSG.ARCHIVE_FAILED('хост не умеет архивировать (нет workspaceRegistry)'),
+      )
+      return false
+    }
+    try {
+      await call.call(registry, sessionId, { stopActivity: true })
+    } catch (err) {
+      await this.client.sendMessage(chatId, MSG.ARCHIVE_FAILED(this.redact(err)))
+      return false
+    }
+    const binding = this.bindings.get(String(chatId))
+    if (binding?.sessionId === sessionId) {
+      this.bindings.delete(String(chatId))
+      this.pendingAsks.delete(String(chatId))
+      this.saveBindings()
+    }
+    await this.client.sendMessage(chatId, MSG.ARCHIVE_DONE(label ?? sessionId))
+    return true
+  }
+
+  /** /notify: what this chat receives about the bound session. */
+  private async handleNotifyCommand(chatId: number, arg?: string): Promise<void> {
+    const current = this.notificationMode(chatId)
+    const wanted = (arg ?? '').trim().toLowerCase()
+    if (wanted === 'on' || wanted === 'all') {
+      this.notifyPrefs.set(String(chatId), 'all')
+      this.saveBindings()
+      await this.client.sendMessage(chatId, MSG.NOTIFY_SET('all'))
+      return
+    }
+    if (wanted === 'errors' || wanted === 'error') {
+      this.notifyPrefs.set(String(chatId), 'errors')
+      this.saveBindings()
+      await this.client.sendMessage(chatId, MSG.NOTIFY_SET('errors'))
+      return
+    }
+    if (wanted === 'off' || wanted === 'none') {
+      this.notifyPrefs.set(String(chatId), 'off')
+      this.saveBindings()
+      await this.client.sendMessage(chatId, MSG.NOTIFY_SET('off'))
+      return
+    }
+    await this.client.sendMessage(chatId, MSG.NOTIFY_STATE(current))
+  }
+
+  private notificationMode(chatId: number): 'all' | 'errors' | 'off' {
+    return this.notifyPrefs.get(String(chatId)) ?? 'all'
+  }
+
+  /** Human explanation for a failed turn, with a hint for the usual causes. */
+  private describeTurnError(error?: { message?: string; code?: string }): string {
+    const raw = String(error?.message ?? '').replace(/\s+/g, ' ').trim()
+    const code = String(error?.code ?? '').trim()
+    const probe = `${code} ${raw}`.toLowerCase()
+    let hint = ''
+    if (/quota|credit|balance|insufficient|402|payment|token.?limit/.test(probe)) {
+      hint = 'похоже, закончились токены или квота провайдера'
+    } else if (/429|rate.?limit|too many requests|overload/.test(probe)) {
+      hint = 'похоже, упёрлись в лимит запросов — попробуйте позже'
+    } else if (/404|model.?not.?found|no such model|model.*(unavailable|not available|disabled)/.test(probe)) {
+      hint = 'похоже, модель недоступна — смените её через /model'
+    } else if (/context|too long|maximum.*token|overflow/.test(probe)) {
+      hint = 'похоже, переполнен контекст — поможет /compact'
+    } else if (/timeout|timed out|econnreset|econnrefused|network|fetch failed|dns/.test(probe)) {
+      hint = 'похоже, сеть или недоступный провайдер'
+    } else if (/401|403|unauthor|forbidden|api.?key|credential/.test(probe)) {
+      hint = 'похоже, ключ или доступ к провайдеру не принят'
+    }
+    const tail = [code ? `Код: ${code}` : '', hint ? `Похоже: ${hint}` : ''].filter(Boolean).join(' · ')
+    const head = raw || code || 'причина не сообщена'
+    return `⚠️ Сессия упала: ${head}${tail ? `\n${tail}` : ''}`
+  }
 
   private bindingsPath(): string {
     // DSH_TELEGRAM_BINDINGS_FILE overrides the location (tests must isolate
@@ -1948,6 +2221,7 @@ export class TelegramBridge {
       const obj = {
         bindings: Object.fromEntries(this.bindings),
         renderPrefs: Object.fromEntries(this.renderPrefs),
+        notifyPrefs: Object.fromEntries(this.notifyPrefs),
       }
       mkdirSync(dirname(this.bindingsPath()), { recursive: true })
       writeFileSync(this.bindingsPath(), JSON.stringify(obj, null, 2))
@@ -1963,6 +2237,7 @@ export class TelegramBridge {
       const data = parsed as {
         bindings?: Record<string, { chatId?: number; sessionId?: string; label?: string }>
         renderPrefs?: Record<string, string>
+        notifyPrefs?: Record<string, string>
       }
       // Legacy files (pre-renderPrefs) stored the bindings flat at the top level.
       const flat = parsed as Record<string, { chatId?: number; sessionId?: string; label?: string }>
@@ -1981,6 +2256,11 @@ export class TelegramBridge {
       for (const [chatId, mode] of Object.entries(data.renderPrefs ?? {})) {
         if (mode === 'rich' || mode === 'html') {
           this.renderPrefs.set(String(chatId), mode)
+        }
+      }
+      for (const [chatId, mode] of Object.entries(data.notifyPrefs ?? {})) {
+        if (mode === 'all' || mode === 'errors' || mode === 'off') {
+          this.notifyPrefs.set(String(chatId), mode)
         }
       }
       if (n > 0)

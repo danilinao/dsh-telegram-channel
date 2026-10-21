@@ -35,6 +35,16 @@ Telegram-пульт для **DeepSeek Harness**: телефон подключа
   ответ из Web закрывает канал в TG.
 - **Модель, контекст, сжатие.** `/model`, `/status`, `/compact`, `/mission`,
   `/stop`, `/new` — из телефона.
+- **Проекты и сессии целиком с телефона.** В списке видны все рабочие области,
+  включая пустые; в пустой области кнопка создаёт сессию. `/newproject <путь>` (или
+  кнопка «➕ Новый проект») добавляет в реестр новую папку, `/new` создаёт диалог в
+  текущей области, 🗄 у сессии или `/archive` убирают её в архив (работа
+  останавливается, из меню и Web сессия исчезает).
+- **Уведомления о состоянии сессии.** В чат приходит: успешное завершение хода,
+  падение с текстом ошибки и подсказкой (кончились токены/квота, лимит запросов,
+  модель недоступна, переполнен контекст, сеть, ключ), достижение лимита выходных
+  токенов, аварийный обрыв, и вопрос агента («❓ Сессия задала вопрос и ждёт
+  ответа»). Режим переключается: `/notify on | errors | off`.
 
 ## Установка
 
@@ -76,6 +86,10 @@ systemctl restart dsh           # плагин монтируется при с�
 | `/stop` | прервать текущий ход |
 | `/mission` | список задач и прогресс |
 | `/new` | новый диалог в текущей области и привязка |
+| `/newproject <путь> [\| Название]` | добавить папку как проект (рабочую область) |
+| `/archive` | убрать привязанную сессию в архив |
+| `/notify on\|errors\|off` | какие уведомления присылать |
+| `/projects` | список проектов и сессий (то же, что `/sessions`) |
 | `/unbind` | отвязать телефон (сессия на компьютере остаётся) |
 | `/cancel` | закрыть ответы/подтверждения в Telegram |
 | `/help` | помощь |
@@ -87,8 +101,9 @@ systemctl restart dsh           # плагин монтируется при с�
 `workspaceRegistry`, `sessionController.modelCatalog` / `selectModel` / `create`),
 потому что сервис `apiProxy`, на который опирался оригинал 0.3.5, в 0.2 удалён.
 Старый путь через `apiProxy` сохранён и используется, если сервис доступен.
-Отправка изображений пока идёт только через `apiProxy` — на 0.2 этот путь
-недоступен.
+Отправка изображений тоже портирована: на 0.2 вложение уходит через
+`sessionController.prompt`.
+Проекты и архив — через `workspaceRegistry.create` / `archiveSession`.
 
 Версия `0.4.0`. Проверка совместимости DSH привязана к точной версии пакета,
 поэтому для неё выдано исключение — см. [UPSTREAM.md](UPSTREAM.md).
@@ -147,6 +162,19 @@ sync/publish workflow.
   answer given in the web UI closes the Telegram channel for that request.
 - **Model, context and compaction from the phone.** `/model`, `/status`,
   `/compact`, `/mission`, `/stop`, `/new`.
+- **Projects and sessions, fully managed from the phone.** The workspace list
+  shows every registered project including empty ones; an empty project offers a
+  "create session here" button. `/newproject <path> [ | Title]` (or the
+  "➕ Новый проект" button) registers a new folder, `/new` creates a session in
+  the current workspace, and 🗄 next to a session (or `/archive`) moves it to the
+  archive — the session is stopped and disappears from both the menu and the web
+  UI.
+- **Session state notifications.** The chat receives a ✅ when a turn completes,
+  a ⚠️ with the error text plus a hint when it fails (quota/tokens exhausted,
+  rate limit, model unavailable, context overflow, network, credentials), a
+  warning for the output-token ceiling and for crash-orphaned turns, and
+  "❓ the session asked a question and is waiting". Per-chat mode:
+  `/notify on | errors | off`.
 
 ## Requirements
 
@@ -216,6 +244,10 @@ the row back to its loader entry and the settings form becomes read-only.
 | `/stop` | abort the current turn |
 | `/mission` | todo list and progress |
 | `/new` | create a new session in the current workspace and attach to it |
+| `/newproject <path> [\| Title]` | register a folder as a project (workspace) |
+| `/archive` | move the attached session to the archive |
+| `/notify on\|errors\|off` | which notifications this chat receives |
+| `/projects` | project/session list (alias of `/sessions`) |
 | `/unbind` | detach the phone; the desktop session keeps running |
 | `/cancel` | close Telegram-side questions/approvals (they stay answerable in the web UI) |
 | `/help` | help |
@@ -256,9 +288,12 @@ The old `apiProxy` route is still attempted first, so the plugin also works on
 0.1.x hosts. Session ids are normalised before the archive check, because the
 host registry mixes both spellings.
 
-Known gap: image sending still calls `apiProxy.sessions.prompt`, which does not
-exist on 0.2, so `/send photo` style input answers with a clear error there; text,
-attachments-free questions and approvals work normally.
+Image sending is ported as well: on 0.2 the attachment goes through
+`sessionController.prompt({ requestId, sessionId, mode: 'queue', content })` with
+the same content parts the web UI sends. Projects and archiving use
+`workspaceRegistry.create(path, title)` and
+`workspaceRegistry.archiveSession(id, { stopActivity: true })`, so an archived
+session is stopped rather than left burning tokens.
 
 The package version is `0.4.0`. DSH checks compatibility against an **exact**
 package version, so an exemption is required:
