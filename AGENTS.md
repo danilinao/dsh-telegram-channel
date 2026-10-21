@@ -1,8 +1,10 @@
 # tg-bot-dsh — правила работы агента
 
 Telegram-пульт для DeepSeek Harness: плагин `dsh-telegram-channel` (ответвление
-`hi-wenw/dsh-telegram-channel`). Плагин живёт **внутри процесса `dsh web`** и
-подключён к профилю `web` как `link:`-зависимость из этой папки.
+`hi-wenw/dsh-telegram-channel`). Плагин живёт **внутри процесса `dsh web`**. В профиле `web` он установлен
+онлайн — `github:danilinao/dsh-telegram-channel` (снимок `main`), поэтому правки
+в этой папке в бота сами не попадают: для разработки переключить на
+`link:/home/alexey/projects/tg-bot-dsh`, после — вернуть `github:` и переустановить.
 
 ## Сначала — память
 

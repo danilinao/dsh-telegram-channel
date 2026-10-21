@@ -74,13 +74,18 @@ npm run check    # typecheck → build → 62 теста → проверка с
 ## Установка и версия
 
 ```bash
+# онлайн-установка с GitHub (то, что стоит сейчас)
+dsh plugin --profile web add github:danilinao/dsh-telegram-channel
+# разработка из этой папки
 dsh plugin --profile web add link:/home/alexey/projects/tg-bot-dsh
 systemctl restart dsh        # плагин монтируется только при старте
 ```
 
-> Переезд 2026-10-21: код лежит в `/home/alexey/projects/tg-bot-dsh`, а на
-> старом месте `/home/alexey/dsh-plugins/dsh-telegram-channel` оставлен симлинк
-> на него — профиль `web` по-прежнему ссылается на старый путь.
+> Переезд 2026-10-21: код лежит в `/home/alexey/projects/tg-bot-dsh`.
+> Вечером того же дня профиль переведён на онлайн-установку —
+> `github:danilinao/dsh-telegram-channel` (0.8.0); симлинк
+> `/home/alexey/dsh-plugins/dsh-telegram-channel` больше не используется и нужен
+> только для возврата к `link:` при разработке.
 
 С 0.8.0 peer-диапазоны `@deepseek-ai/dsh*` рассчитаны на текущий рантайм
 (`^0.2.1-alpha.2`), поэтому исключение `allow-version` больше не требуется.
