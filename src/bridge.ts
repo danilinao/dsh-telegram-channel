@@ -10,8 +10,8 @@ import type { ContentBlock, TextBlock } from '@deepseek-ai/dsh-llm/types'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session/types'
 import { isAuthorized } from './auth.js'
 import { resolveApiProxy } from './apiproxy.js'
-import {
   catalogFromLiveAgents,
+  resolveSessionTitle,
   loadCatalog,
   truncateButton,
   visibleSessionsForWorkspace,
@@ -196,7 +196,7 @@ const MAX_BUTTONS = 40
 
 function lastContextKeyboard(): InlineKeyboardMarkup {
   return {
-    inline_keyboard: [[{ text: '查看上次对话', callback_data: LAST_CB }]],
+    inline_keyboard: [[{ text: 'Последний диалог', callback_data: LAST_CB }]],
   }
 }
 
@@ -238,6 +238,8 @@ export class TelegramBridge {
 
   private readonly bindings = new Map<string, Binding>()
   private readonly pickers = new Map<string, PickerState>()
+  /** Session names fetched from host projections, keyed by id and updatedAt. */
+  private readonly titleCache = new Map<string, { at: number; title: string }>()
   /** chatId → model awaiting reasoning-effort pick (kept outside picker so list refreshes won't drop it). */
   private readonly pendingModels = new Map<string, ModelOption>()
   private polling = false
@@ -312,19 +314,19 @@ export class TelegramBridge {
       on: (event: string, handler: (req: ApprovalRequestLike, next: () => Promise<string>) => Promise<string>) => () => void
     }).on('approval/request', (req, next) => this.onApprovalRequest(req, next))
     void this.client.setMyCommands([
-      { command: 'start', description: '欢迎与用法' },
-      { command: 'sessions', description: '按工作区列出并附着会话' },
-      { command: 'last', description: '查看上次问答（续接上下文）' },
-      { command: 'model', description: '切换当前绑定会话的模型' },
-      { command: 'status', description: '会话状态：模型/上下文/统计（首token/速率/tokens）' },
-      { command: 'compact', description: '压缩当前会话历史（缩短上下文，空闲时执行）' },
-      { command: 'rich', description: '渲染：on 富文本 / off HTML 兼容（本聊天，需新版客户端）' },
-      { command: 'unbind', description: '断开手机绑定（不关闭本机会话）' },
-      { command: 'stop', description: '中止当前正在运行的任务' },
-      { command: 'mission', description: '查看任务清单与完成情况' },
-      { command: 'new', description: '在当前工作区新开对话并附着' },
-      { command: 'cancel', description: '关闭 TG 端作答/审批（Web 端仍可答）' },
-      { command: 'help', description: '显示帮助' },
+      { command: 'start', description: 'Приветствие и как пользоваться' },
+      { command: 'sessions', description: 'Сессии по рабочим областям и привязка' },
+      { command: 'last', description: 'Прошлый вопрос-ответ (контекст)' },
+      { command: 'model', description: 'Сменить модель сессии' },
+      { command: 'status', description: 'Состояние: модель, контекст, статистика' },
+      { command: 'compact', description: 'Сжать историю сессии (сократить контекст)' },
+      { command: 'rich', description: 'Рендер: on rich / off HTML (для этого чата)' },
+      { command: 'unbind', description: 'Отвязать телефон (сессия остаётся)' },
+      { command: 'stop', description: 'Прервать текущую задачу' },
+      { command: 'mission', description: 'Список задач и прогресс' },
+      { command: 'new', description: 'Новый диалог в этой области и привязка' },
+      { command: 'cancel', description: 'Закрыть ответы/подтверждения в TG' },
+      { command: 'help', description: 'Помощь' },
     ]).then(() => {
       this.ctx.logger.info('dsh-telegram-channel: bot commands registered')
     }).catch((err) => {
@@ -455,9 +457,9 @@ export class TelegramBridge {
         if (this.pendingApprovalsTG.delete(String(chatId))) cancelled = true
         if (this.pendingAsks.delete(String(chatId))) cancelled = true
         if (cancelled)
-          await this.enqueueNotice(chatId, '已关闭 TG 端作答/审批（该问题仍可在 Web 端回答）')
+          await this.enqueueNotice(chatId, 'Ответы/подтверждения в Telegram закрыты (в Web вопрос по-прежнему доступен)')
         else
-          await this.client.sendMessage(chatId, '当前没有待作答的提问或审批')
+          await this.client.sendMessage(chatId, 'Сейчас нет вопросов или подтверждений, ждущих ответа')
         return
       }
       case 'unknown':
@@ -522,7 +524,7 @@ export class TelegramBridge {
       const index = Number(data.slice(SID_CB.length))
       const row = picker?.sessions[index]
       if (!row) {
-        await this.client.answerCallbackQuery(cq.id, '会话已过期')
+        await this.client.answerCallbackQuery(cq.id, 'Сессия устарела')
         await this.client.sendMessage(chatId, MSG.PICKER_STALE)
         return
       }
@@ -533,7 +535,7 @@ export class TelegramBridge {
       const index = Number(data.slice(MODEL_CB.length))
       const option = picker?.models?.[index]
       if (!option) {
-        await this.client.answerCallbackQuery(cq.id, '列表已过期')
+        await this.client.answerCallbackQuery(cq.id, 'Список устарел')
         await this.client.sendMessage(chatId, MSG.PICKER_STALE)
         return
       }
@@ -563,7 +565,7 @@ export class TelegramBridge {
       const pending = this.pendingModels.get(String(chatId)) ?? picker?.pendingModel
       const effort = pending?.efforts?.[index]
       if (!pending || !effort?.id) {
-        await this.client.answerCallbackQuery(cq.id, '列表已过期')
+        await this.client.answerCallbackQuery(cq.id, 'Список устарел')
         await this.client.sendMessage(chatId, MSG.PICKER_STALE)
         return
       }
@@ -615,18 +617,53 @@ export class TelegramBridge {
     }
     const body = [
       catalog.complete
-        ? `选择工作区（共 ${workspaces.length} 个，与 Web 对齐，已排除归档）：`
-        : `选择工作区（共 ${workspaces.length} 个）⚠️ 仅运行中的会话（apiProxy 未就绪，完整列表需插件 ≥0.3.2 并重启 dsh web）：`,
+        ? `Выберите рабочую область (${workspaces.length}, как в Web, без архива):`
+        : `Выберите рабочую область (${workspaces.length}) ⚠️ только запущенные сессии (apiProxy не готов; полный список — плагин ≥0.3.2 и перезапуск dsh web):`,
       '',
       ...shown.map((ws, i) => {
         const n = visibleSessionsForWorkspace(catalog, ws).length
-        return `${i + 1}. ${ws.title}\n   ${ws.path}\n   会话：${n}`
+        return `${i + 1}. ${ws.title}\n   ${ws.path}\n   сессий: ${n}`
       }),
-      workspaces.length > MAX_BUTTONS ? `\n仅显示前 ${MAX_BUTTONS} 个工作区。` : '',
+      workspaces.length > MAX_BUTTONS ? `\nПоказаны первые ${MAX_BUTTONS} рабочих областей.` : '',
       '',
-      '点下方按钮进入该工作区的会话列表。',
+      'Нажмите кнопку ниже, чтобы открыть сессии этой области.',
     ].filter(Boolean).join('\n')
     await this.client.sendMessage(chatId, body, undefined, keyboard)
+  }
+
+  /**
+   * Button caption for one session: `N. <name> <state>`. The name is the Web
+   * session title (the catalog falls back to `workspace · date`), so the phone
+   * list reads like the desktop sidebar instead of bare numbers.
+   * ▶ = the session is live in memory, ▷ = parked (resumed on attach).
+   */
+  private sessionButtonText(row: SessionRow, index: number): string {
+    const name = (row.title ?? '').trim() || `сессия …${row.sessionId.slice(-12)}`
+    return `${index + 1}. ${name} ${row.running ? '▶' : '▷'}`
+  }
+
+  /**
+   * Fill in real session names for the rows the picker is about to show.
+   * `sessions.list` leaves cold sessions without a projection block, so ask the
+   * host per session (cached by updatedAt) — that is what makes a button read
+   * like the Web sidebar instead of "workspace · date".
+   */
+  private async ensureSessionNames(rows: SessionRow[]): Promise<void> {
+    const pending = rows.filter((row) => !row.named)
+    if (pending.length === 0) return
+    await Promise.all(pending.map(async (row) => {
+      const cached = this.titleCache.get(row.sessionId)
+      if (cached && cached.at === row.updatedAt) {
+        row.title = cached.title
+        row.named = true
+        return
+      }
+      const title = await resolveSessionTitle(this.ctx, row.sessionId)
+      if (!title) return
+      this.titleCache.set(row.sessionId, { at: row.updatedAt, title })
+      row.title = title
+      row.named = true
+    }))
   }
 
   private async sendSessionPicker(chatId: number, workspaceIndex: number): Promise<void> {
@@ -648,29 +685,30 @@ export class TelegramBridge {
       return
     }
     const shown = sessions.slice(0, MAX_BUTTONS)
+    await this.ensureSessionNames(shown)
     this.pickers.set(String(chatId), { workspaces, sessions: shown, catalog })
     const keyboard: InlineKeyboardMarkup = {
       inline_keyboard: [
         ...shown.map((row, i) => ([{
-          text: truncateButton(`${i + 1}. ${row.title}${row.running ? '' : ' · 冷'}`),
+          text: truncateButton(this.sessionButtonText(row, i)),
           callback_data: `${SID_CB}${i}`,
         }])),
-        [{ text: '← 返回工作区', callback_data: BACK_WS_CB }],
+        [{ text: '← К областям', callback_data: BACK_WS_CB }],
       ],
     }
     const body = [
-      `工作区：${workspace.title}`,
+      `Рабочая область: ${workspace.title}`,
       workspace.path,
       '',
-      `选择会话（共 ${sessions.length} 个）：`,
+      `Выберите сессию (всего ${sessions.length}):`,
       '',
       ...shown.map((row, i) => {
-        const mark = row.running ? '运行中' : '未附着'
+        const mark = row.running ? 'идёт работа' : 'не запущена'
         return `${i + 1}. ${row.title}\n   ${mark} · …${row.sessionId.slice(-12)}`
       }),
-      sessions.length > MAX_BUTTONS ? `\n仅显示前 ${MAX_BUTTONS} 个会话。` : '',
+      sessions.length > MAX_BUTTONS ? `\nПоказаны первые ${MAX_BUTTONS} сессий.` : '',
       '',
-      '点下方按钮附着；冷会话会自动 resume（不关闭 Web）。',
+      'Нажмите кнопку, чтобы привязать; неактивная сессия поднимется автоматически (Web не закрывается).',
     ].filter(Boolean).join('\n')
     await this.client.sendMessage(chatId, body, undefined, keyboard)
   }
@@ -678,7 +716,7 @@ export class TelegramBridge {
   private async bindSession(chatId: number, callbackId: string, row: SessionRow): Promise<void> {
     const agent = await this.ensureLiveAgent(row.sessionId)
     if (!agent) {
-      await this.client.answerCallbackQuery(callbackId, '无法附着')
+      await this.client.answerCallbackQuery(callbackId, 'Не удалось привязать')
       await this.client.sendMessage(chatId, MSG.RESUME_FAILED)
       return
     }
@@ -691,7 +729,7 @@ export class TelegramBridge {
     const stale = this.pendingAsks.get(String(chatId))
     if (stale && stale.sessionId !== String(agent.id)) this.pendingAsks.delete(String(chatId))
     this.saveBindings()
-    await this.client.answerCallbackQuery(callbackId, '已附着')
+    await this.client.answerCallbackQuery(callbackId, 'Привязано')
     await this.client.sendMessage(chatId, MSG.BOUND(label), undefined, lastContextKeyboard())
   }
 
@@ -751,10 +789,10 @@ export class TelegramBridge {
         }])),
       }
       const body = [
-        `当前模型：${formatModel(snap.current)}`,
-        `会话：${binding.label}`,
+        `Текущая модель: ${formatModel(snap.current)}`,
+        `Сессия: ${binding.label}`,
         '',
-        '选择新模型（下一回合生效）：',
+        'Выберите модель (действует со следующего хода):',
       ].join('\n')
       await this.client.sendMessage(chatId, body, undefined, keyboard)
     } catch (err) {
@@ -772,12 +810,12 @@ export class TelegramBridge {
           text: truncateButton(e.name || e.id),
           callback_data: `${EFFORT_CB}${i}`,
         }])),
-        [{ text: '← 返回模型列表', callback_data: BACK_MODEL_CB }],
+        [{ text: '← К списку моделей', callback_data: BACK_MODEL_CB }],
       ],
     }
     await this.client.sendMessage(
       chatId,
-      `已选 ${option.label}\n请选择 reasoning effort：`,
+      `Выбрано: ${option.label}\nТеперь выберите глубину размышлений:`,
       undefined,
       keyboard,
     )
@@ -791,7 +829,7 @@ export class TelegramBridge {
   ): Promise<void> {
     const binding = this.bindings.get(String(chatId))
     if (!binding) {
-      await this.client.answerCallbackQuery(callbackId, '未绑定')
+      await this.client.answerCallbackQuery(callbackId, 'Нет привязки')
       await this.client.sendMessage(chatId, MSG.NEED_BIND)
       return
     }
@@ -806,12 +844,12 @@ export class TelegramBridge {
       this.pendingModels.delete(String(chatId))
       const picker = this.pickers.get(String(chatId))
       if (picker) picker.pendingModel = undefined
-      await this.client.answerCallbackQuery(callbackId, '已切换')
+      await this.client.answerCallbackQuery(callbackId, 'Переключено')
       await this.client.sendMessage(chatId, MSG.MODEL_SET(formatModel(selected)))
     } catch (err) {
       this.ctx.logger.warn(`dsh-telegram-channel: selectModel failed: ${this.redact(err)}`)
       const detail = err instanceof Error ? err.message : String(err)
-      await this.client.answerCallbackQuery(callbackId, '切换失败')
+      await this.client.answerCallbackQuery(callbackId, 'Не удалось переключить')
       await this.client.sendMessage(chatId, MSG.MODEL_FAILED(detail))
     }
   }
@@ -1079,7 +1117,7 @@ export class TelegramBridge {
         && (agent as { phase?: { kind?: string } }).phase?.kind !== 'idle')
     agent.followup(message)
     if (busy) {
-      await this.enqueueNotice(chatId, '已加入队列：当前任务完成后将处理这条消息')
+      await this.enqueueNotice(chatId, 'В очереди: сообщение обработается после текущей задачи')
     }
   }
 
@@ -1124,7 +1162,7 @@ export class TelegramBridge {
   ): Promise<WireContentPart | undefined> {
     try {
       const file = await this.client.getFile(fileId)
-      if (!file.file_path) throw new Error('TG 未返回文件路径')
+      if (!file.file_path) throw new Error('Telegram не вернул путь к файлу')
       const bytes = await this.client.downloadFile(file.file_path)
       // Buffer base64 is canonical (standard alphabet, no whitespace) — the host
       // attachment admission rejects non-canonical forms outright.
@@ -1178,7 +1216,7 @@ export class TelegramBridge {
     }
     const proxy = resolveApiProxy(this.ctx)
     if (!proxy?.sessions?.prompt) {
-      await this.enqueueNotice(chatId, '当前宿主不支持会话消息接口（sessions.prompt），无法发送图片。')
+      await this.enqueueNotice(chatId, 'Хост не поддерживает sessions.prompt — отправить изображение нельзя.')
       return
     }
     const busy = this.busySessions.has(binding.sessionId)
@@ -1198,7 +1236,7 @@ export class TelegramBridge {
     const result = res?.result
     if (!result?.ok) {
       const code = result?.error?.code
-      const message = String(result?.error?.message ?? '宿主未确认接收')
+      const message = String(result?.error?.message ?? 'хост не подтвердил приём')
       if (code === 'attachment-error' && result?.error?.details?.reason === 'MODEL_DOES_NOT_SUPPORT_IMAGES') {
         await this.enqueueNotice(chatId, MSG.IMAGE_MODEL_UNSUPPORTED)
       } else {
@@ -1208,7 +1246,7 @@ export class TelegramBridge {
       return
     }
     if (busy) {
-      await this.enqueueNotice(chatId, '已加入队列：当前任务完成后将处理这条消息')
+      await this.enqueueNotice(chatId, 'В очереди: сообщение обработается после текущей задачи')
     }
   }
 
@@ -1287,14 +1325,14 @@ export class TelegramBridge {
       if (kind === 'error') {
         const detail = String(reason?.error?.message ?? reason?.error?.code ?? '').replace(/\s+/g, ' ').slice(0, 300)
         for (const b of targets)
-          this.enqueueNotice(b.chatId, `本轮异常结束（API/内部错误）${detail ? `：${detail}` : ''}`)
+          this.enqueueNotice(b.chatId, `Ход прерван из-за ошибки (API/внутренняя)${detail ? `：${detail}` : ''}`)
       } else if (kind === 'aborted') {
         const manual = reason?.reason?.kind === 'user'
         for (const b of targets)
-          this.enqueueNotice(b.chatId, manual ? '本轮已被手动中止' : '本轮已被中断')
+          this.enqueueNotice(b.chatId, manual ? 'Ход остановлен вручную' : 'Ход прерван')
       } else if (kind === 'interrupted') {
         for (const b of targets)
-          this.enqueueNotice(b.chatId, '会话曾被异常退出（崩溃恢复），本轮被标记中断')
+          this.enqueueNotice(b.chatId, 'Сессия пережила аварийное завершение (восстановление после сбоя) — ход помечен как прерванный')
       }
       return
     }
@@ -1348,7 +1386,7 @@ export class TelegramBridge {
         const callKey = String(data.message?.tool_use_id ?? data.message?.callId ?? '')
         const name = this.callNames.get(callKey) ?? 'tool'
         for (const b of targets)
-          this.enqueueNotice(b.chatId, `> 工具 ${name} 失败：${String(data.error.name ?? 'Error')}${data.error.code ? `/${String(data.error.code)}` : ''}`)
+          this.enqueueNotice(b.chatId, `> Инструмент ${name} — ошибка: ${String(data.error.name ?? 'Error')}${data.error.code ? `/${String(data.error.code)}` : ''}`)
       }
       return
     }
@@ -1361,7 +1399,7 @@ export class TelegramBridge {
       const current = todos.find((t) => t?.status === 'in_progress') ?? todos.find((t) => t?.status === 'pending')
       const cur = current ? String(current.content ?? '').slice(0, 50) : ''
       for (const b of targets)
-        this.enqueueNotice(b.chatId, `> 进度 ${done}/${todos.length}${cur ? `：${cur}` : ''}`)
+        this.enqueueNotice(b.chatId, `> Прогресс ${done}/${todos.length}${cur ? `：${cur}` : ''}`)
       return
     }
   }
@@ -1613,7 +1651,7 @@ export class TelegramBridge {
       if (p.req !== request) continue
       this.pendingAsks.delete(chatId)
       if (!p.ask.answered) {
-        this.enqueueNotice(Number(chatId), '该问题已在 Web 端作答，TG 作答通道关闭')
+        this.enqueueNotice(Number(chatId), 'На вопрос уже ответили в Web — канал ответов в TG закрыт')
       }
     }
   }
@@ -1625,16 +1663,16 @@ export class TelegramBridge {
   }
 
   private formatAskPending(questions: TgQuestionItem[]): string {
-    const lines = ['待回答（回复字母选项，或直接输入自定义答案；/cancel 关闭 TG 作答）']
+    const lines = ['Ждут ответа (ответьте буквой варианта или введите свой ответ; /cancel — закрыть ответы в TG)']
     questions.forEach((q, i) => {
       const prefix = questions.length > 1 ? `Q${i + 1}. ` : ''
       lines.push(`${prefix}${q.question ?? ''}`)
       const opts = Array.isArray(q.options) ? q.options : []
       if (opts.length === 0) {
-        lines.push('  （开放问题，直接输入答案）')
+        lines.push('  (открытый вопрос — просто введите ответ)')
       } else {
         opts.forEach((o, j) => lines.push(`  [${String.fromCharCode(65 + j)}] ${o.label}${o.description ? ` — ${o.description}` : ''}`))
-        if (q.multiSelect) lines.push('  （可多选，如：A,B）')
+        if (q.multiSelect) lines.push('  (можно несколько, например: A,B)')
       }
     })
     return lines.join('\n')
@@ -1654,14 +1692,14 @@ export class TelegramBridge {
         else parts.push([null, line])
       }
       if (parts.some(([idx]) => idx === null)) {
-        await this.enqueueNotice(chatId, `共 ${questions.length} 个问题，请每行用 1:/2: 前缀分别作答`)
+        await this.enqueueNotice(chatId, `Вопросов: ${questions.length} — отвечайте построчно с префиксом 1:/2:`)
         return
       }
     }
     const answers: Array<{ id?: string; selected: string[]; custom?: string }> = []
     for (const [idx, raw] of parts) {
       if (idx === null || idx < 0 || idx >= questions.length) {
-        await this.enqueueNotice(chatId, `题号 ${(idx ?? 0) + 1} 不存在（共 ${questions.length} 题）`)
+        await this.enqueueNotice(chatId, `Вопроса №${(idx ?? 0) + 1} нет (всего ${questions.length})`)
         return
       }
       const q = questions[idx]!
@@ -1676,7 +1714,7 @@ export class TelegramBridge {
         for (const s of letters) {
           const i = s.toUpperCase().charCodeAt(0) - 65
           if (i < 0 || i >= opts.length) {
-            await this.enqueueNotice(chatId, `选项 ${s.toUpperCase()} 不存在（范围 A-${String.fromCharCode(64 + opts.length)}），请重答或 /cancel`)
+            await this.enqueueNotice(chatId, `Варианта ${s.toUpperCase()} нет (доступно A-${String.fromCharCode(64 + opts.length)}). Ответьте снова или /cancel`)
             return
           }
           selected.push(opts[i]!.label)
@@ -1691,7 +1729,7 @@ export class TelegramBridge {
       if (p.ask === ask) this.pendingAsks.delete(cid)
     }
     ask.resolve({ answers })
-    this.enqueueNotice(chatId, '已提交你的回答')
+    this.enqueueNotice(chatId, 'Ответ отправлен')
   }
 
   // ── approval: TG answering via dual-path race on the request waterfall ──
@@ -1727,7 +1765,7 @@ export class TelegramBridge {
       const reason = req?.reason ? String(req.reason).slice(0, 200) : ''
       for (const chatId of targets) {
         this.pendingApprovalsTG.set(chatId, { toolName, ask })
-        this.enqueueNotice(Number(chatId), `权限审批：${toolName}${reason ? `\n(${reason})` : ''}\n回复 [A] 允许一次 / [B] 拒绝（/cancel 关闭 TG 审批）`)
+        this.enqueueNotice(Number(chatId), `Запрос разрешения: ${toolName}${reason ? `\n(${reason})` : ''}\nОтветьте [A] — разрешить один раз / [B] — отклонить (/cancel — закрыть в TG)`)
       }
     }
     // No bound TG chat: promise never settles — the UI remains the only answer path.
@@ -1738,7 +1776,7 @@ export class TelegramBridge {
         this.pendingApprovalsTG.delete(chatId)
         if (!p.ask.answered) {
           p.ask.reject(new Error('superseded-by-gui'))
-          this.enqueueNotice(Number(chatId), '该审批已在 Web 端处理')
+          this.enqueueNotice(Number(chatId), 'Это разрешение уже обработано в Web')
         }
       }
     }, () => {
@@ -1758,14 +1796,14 @@ export class TelegramBridge {
       }
       if (cleaned === 'A') {
         approval.ask.resolve('allowed-once')
-        await this.enqueueNotice(chatId, `已允许 ${approval.toolName} 执行一次`)
+        await this.enqueueNotice(chatId, `Разрешён один запуск: ${approval.toolName}`)
       } else {
         approval.ask.resolve('rejected')
-        await this.enqueueNotice(chatId, '已拒绝该工具执行')
+        await this.enqueueNotice(chatId, 'Запуск инструмента отклонён')
       }
       return
     }
-    await this.enqueueNotice(chatId, '请回复 [A] 允许一次 或 [B] 拒绝（/cancel 关闭）')
+    await this.enqueueNotice(chatId, 'Ответьте [A] — разрешить один раз или [B] — отклонить (/cancel — закрыть)')
   }
 
   // ── /stop /mission /new commands ──
@@ -1778,7 +1816,7 @@ export class TelegramBridge {
     }
     const agent = this.findLiveAgent(binding.sessionId)
     if (!agent) {
-      await this.client.sendMessage(chatId, '当前会话没有正在运行的任务')
+      await this.client.sendMessage(chatId, 'В сессии нет выполняющейся задачи')
       return
     }
     try {
@@ -1786,7 +1824,7 @@ export class TelegramBridge {
     } catch (err) {
       this.ctx.logger.warn(`dsh-telegram-channel: stop failed: ${this.redact(err)}`)
     }
-    await this.enqueueNotice(chatId, '已请求中止当前轮…')
+    await this.enqueueNotice(chatId, 'Запрошена остановка текущего хода…')
   }
 
   private async sendMission(chatId: number): Promise<void> {
@@ -1796,16 +1834,16 @@ export class TelegramBridge {
       return
     }
     const todos = this.lastTodos.get(binding.sessionId) ?? []
-    const lines = ['任务清单']
+    const lines = ['Список задач']
     if (todos.length === 0) {
-      lines.push('（暂无任务记录，agent 使用 todo 工具后这里会显示）')
+      lines.push('(записей пока нет — появятся, когда агент воспользуется todo)')
     } else {
       const mark: Record<string, string> = { completed: '✓', in_progress: '⟳', pending: '·' }
       todos.forEach((t, i) => lines.push(`${mark[t?.status ?? ''] ?? '·'} ${i + 1}. ${String(t?.content ?? '')}`))
       const done = todos.filter((t) => t?.status === 'completed').length
-      lines.push(`—— ${done}/${todos.length} 已完成`)
+      lines.push(`— выполнено ${done}/${todos.length}`)
     }
-    lines.push(this.busySessions.has(binding.sessionId) ? '（当前任务：运行中，/stop 可中止）' : '（当前空闲）')
+    lines.push(this.busySessions.has(binding.sessionId) ? '(идёт задача: /stop прервёт её)' : '(свободна)')
     await this.client.sendMessage(chatId, lines.join('\n'))
   }
 
@@ -1833,7 +1871,7 @@ export class TelegramBridge {
     }
     const proxy = resolveApiProxy(this.ctx)
     if (!proxy?.sessions?.create) {
-      await this.client.sendMessage(chatId, '当前宿主不支持会话创建接口')
+      await this.client.sendMessage(chatId, 'Хост не поддерживает создание сессий')
       return
     }
     let res: { result?: { ok?: boolean; value?: { sessionId?: string }; error?: { message?: string } } } | undefined
@@ -1844,21 +1882,21 @@ export class TelegramBridge {
         payload,
       }) as typeof res
     } catch (err) {
-      await this.client.sendMessage(chatId, `创建失败：${this.redact(err)}`)
+      await this.client.sendMessage(chatId, `Не удалось создать: ${this.redact(err)}`)
       return
     }
     const newId = res?.result?.ok ? res.result.value?.sessionId : undefined
     if (!newId) {
       const detail = res?.result?.error?.message ?? JSON.stringify(res?.result ?? res)
-      await this.client.sendMessage(chatId, `创建失败：${String(detail).slice(0, 200)}`)
+      await this.client.sendMessage(chatId, `Не удалось создать: ${String(detail).slice(0, 200)}`)
       return
     }
     const stale = this.pendingAsks.get(String(chatId))
     if (stale && stale.sessionId !== String(newId)) this.pendingAsks.delete(String(chatId))
     this.bindings.set(String(chatId), { chatId, sessionId: String(newId), label: binding.label })
     this.saveBindings()
-    const where = workspaceId !== undefined ? '当前工作区' : (fallbackCwd ? `目录 ${fallbackCwd}` : '默认工作区')
-    await this.client.sendMessage(chatId, `已在${where}新开对话并附着：\n${String(newId)}\n直接发消息即可开始`)
+    const where = workspaceId !== undefined ? 'текущая рабочая область' : (fallbackCwd ? `каталог ${fallbackCwd}` : 'рабочая область по умолчанию')
+    await this.client.sendMessage(chatId, `Новый диалог создан и привязан (${where}):\n${String(newId)}\nПросто отправьте сообщение`)
   }
 
   // ── Binding persistence (survives hot reload / restart) ──

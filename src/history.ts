@@ -61,7 +61,7 @@ export function extractLastTurn(events: readonly LooseEvent[]): LastTurn {
     }
     if (ev.type === 'compaction/summary') {
       const text = typeof ev.data?.text === 'string' ? ev.data.text.trim() : ''
-      if (text && !lastAssistant) lastAssistant = `（摘要）${text}`
+      if (text && !lastAssistant) lastAssistant = `(сводка) ${text}`
     }
   }
 
@@ -70,19 +70,19 @@ export function extractLastTurn(events: readonly LooseEvent[]): LastTurn {
 
 export function formatLastTurn(turn: LastTurn, maxEach = 3500): string {
   if (!turn.userText && !turn.assistantText) {
-    return '暂无上次问答（会话可能为空或尚未产生用户回合）。'
+    return 'Прошлых вопросов нет (сессия пуста или не было ходов пользователя).'
   }
   const clip = (s: string) => {
     const chars = [...s]
     if (chars.length <= maxEach) return s
     return `${chars.slice(0, maxEach - 1).join('')}…`
   }
-  const parts: string[] = ['—— 上次对话 ——']
+  const parts: string[] = ['— прошлый диалог —']
   if (turn.userText) {
-    parts.push('', '【用户】', clip(turn.userText))
+    parts.push('', '【Вы】', clip(turn.userText))
   }
   if (turn.assistantText) {
-    parts.push('', '【助手】', clip(turn.assistantText))
+    parts.push('', '【Ассистент】', clip(turn.assistantText))
   }
   return parts.join('\n')
 }

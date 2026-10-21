@@ -6,6 +6,8 @@ export type ApiProxySessions = {
   history?: (req: { rpcId: string; payload: unknown }) => Promise<unknown>
   models?: (req: { rpcId: string; payload: unknown }) => Promise<unknown>
   selectModel?: (req: { rpcId: string; payload: unknown }) => Promise<unknown>
+  /** Per-session projections (title, stats, ...) for cold sessions too. */
+  projections?: (req: { rpcId: string; payload: unknown }) => Promise<unknown>
   /** Create a session (used by /new; payload: workspaceId | cwd). */
   create?: (req: { rpcId: string; payload: unknown }) => Promise<unknown>
   /**

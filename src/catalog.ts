@@ -18,6 +18,10 @@ export interface SessionRow {
   blank: boolean
   running: boolean
   origin?: string
+  /** DSH marks a session archived; the picker must hide it. */
+  archived?: boolean
+  /** true when the name came from DSH projections, false for a local fallback. */
+  named?: boolean
   updatedAt: number
 }
 
@@ -47,17 +51,94 @@ function unwrap<T>(res: unknown): T | undefined {
   return undefined
 }
 
+/** `session-<uuid>` and `<uuid>` name the same session; compare the bare id. */
+export function normalizeSessionId(sessionId: string): string {
+  const id = String(sessionId)
+  return id.startsWith('session-') ? id.slice('session-'.length) : id
+}
+
+/** Is this session archived? Accepts both id spellings, like the Web UI does. */
+export function isArchived(archivedIds: Set<string>, sessionId: string): boolean {
+  const bare = normalizeSessionId(sessionId)
+  return archivedIds.has(sessionId) || archivedIds.has(bare) || archivedIds.has(`session-${bare}`)
+}
+
+/** `21.10 14:05` in local time — keeps untitled sessions distinguishable. */
+function shortWhen(ms: number): string | undefined {
+  if (!Number.isFinite(ms) || ms <= 0) return undefined
+  const d = new Date(ms)
+  const pad = (n: number): string => String(n).padStart(2, '0')
+  return `${pad(d.getDate())}.${pad(d.getMonth() + 1)} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
+
+/**
+ * Session name for buttons/pickers. The Web title wins; when DSH has not
+ * generated one, fall back to `workspace · date` (never a bare number), so a
+ * button always carries something the owner can recognise.
+ */
 function titleOf(summary: {
   sessionId: string
   cwd?: string
-  projections?: { values?: { title?: string | null } }
+  updatedAt?: number
+  projections?: {
+    values?: {
+      title?: string | null
+      /** First/last human messages DSH keeps for title generation. */
+      titleInput?: { first?: { text?: string } | null } | null
+    }
+  }
 }): string {
-  const t = summary.projections?.values?.title
-  if (typeof t === 'string' && t.trim()) return t.trim()
+  const fromHost = projectionTitle(summary)
+  if (fromHost) return fromHost
   const ws = workspaceName(summary.cwd)
+  const when = shortWhen(Number(summary.updatedAt) || 0)
+  if (ws && when) return `${ws} · ${when}`
   if (ws) return ws
   const id = String(summary.sessionId)
-  return id.length > 12 ? `…${id.slice(-12)}` : id
+  const tail = id.length > 12 ? `…${id.slice(-12)}` : id
+  return when ? `${when} · ${tail}` : tail
+}
+
+/** Name straight out of DSH projections: the title, else the first user message. */
+function projectionTitle(summary: {
+  projections?: {
+    values?: {
+      title?: string | null
+      titleInput?: { first?: { text?: string } | null } | null
+    }
+  }
+}): string | undefined {
+  const t = summary.projections?.values?.title
+  if (typeof t === 'string' && t.trim()) return t.trim()
+  const firstText = summary.projections?.values?.titleInput?.first?.text
+  if (typeof firstText === 'string' && firstText.trim()) {
+    const flat = firstText.replace(/\s+/g, ' ').trim()
+    const chars = [...flat]
+    return chars.length > 60 ? `${chars.slice(0, 59).join('')}…` : flat
+  }
+  return undefined
+}
+
+/**
+ * Ask the host for one session's projections. Cold sessions often arrive in
+ * `sessions.list` without a projection block, so this is what puts a real name
+ * on a picker button instead of a date.
+ */
+export async function resolveSessionTitle(
+  ctx: Context,
+  sessionId: string,
+): Promise<string | undefined> {
+  const api = resolveApiProxy(ctx)
+  const call = api?.sessions?.projections
+  if (typeof call !== 'function') return undefined
+  try {
+    const raw = await call({ rpcId: randomUUID(), payload: { sessionId } })
+    const value = unwrap<{ values?: { title?: string | null; titleInput?: { first?: { text?: string } | null } | null } }>(raw)
+    if (!value) return undefined
+    return projectionTitle({ projections: { values: value.values } })
+  } catch {
+    return undefined
+  }
 }
 
 /** Load workspaces + sessions aligned with Web UI (via apiProxy when available). */
@@ -81,23 +162,35 @@ export async function loadCatalog(ctx: Context): Promise<CatalogSnapshot | undef
       blank: boolean
       origin?: string
       cwd?: string
+      /** Present on newer hosts; archived sessions must never reach the picker. */
+      archived?: boolean
+      archivedAt?: number | string | null
       projections?: { values?: { title?: string | null } }
     }>
+    /** Some builds echo the archive list with the session listing too. */
+    archivedSessionIds?: string[]
   }>(sessRaw)
 
   if (!wsVal || !sessVal) return undefined
 
-  const archivedIds = new Set((wsVal.archivedSessionIds ?? []).map(String))
+  const archivedIds = new Set<string>()
+  for (const id of wsVal.archivedSessionIds ?? []) archivedIds.add(String(id))
+  for (const id of sessVal.archivedSessionIds ?? []) archivedIds.add(String(id))
+  for (const item of sessVal.items ?? []) {
+    if (item.archived === true || item.archivedAt) archivedIds.add(String(item.sessionId))
+  }
   const sessionsById = new Map<string, SessionRow>()
   for (const item of sessVal.items ?? []) {
     const sessionId = String(item.sessionId)
     sessionsById.set(sessionId, {
       sessionId,
       title: titleOf({ ...item, sessionId }),
+      named: projectionTitle({ ...item, sessionId }) !== undefined,
       cwd: item.cwd,
       blank: Boolean(item.blank),
       running: Boolean(item.running),
       origin: item.origin,
+      archived: item.archived === true || Boolean(item.archivedAt),
       updatedAt: Number(item.updatedAt) || 0,
     })
   }
@@ -119,9 +212,10 @@ export function visibleSessionsForWorkspace(
 ): SessionRow[] {
   const rows: SessionRow[] = []
   for (const id of workspace.sessionIds) {
-    if (catalog.archivedIds.has(id)) continue
+    if (isArchived(catalog.archivedIds, id)) continue
     const row = catalog.sessionsById.get(id)
     if (!row) continue
+    if (row.archived) continue
     if (row.origin === 'subagent') continue
     if (row.blank) continue
     rows.push(row)
@@ -147,7 +241,7 @@ export function catalogFromLiveAgents(agents: Agent[], ctx?: Context): CatalogSn
   agents.forEach((agent, index) => {
     const parts = describeAgent(agent, index, ctx)
     const sessionId = parts.sessionId
-    const cwd = parts.cwd ?? '(unknown)'
+    const cwd = parts.cwd ?? '(неизвестно)'
     sessionsById.set(sessionId, {
       sessionId,
       title: parts.title || parts.workspace || sessionId,
