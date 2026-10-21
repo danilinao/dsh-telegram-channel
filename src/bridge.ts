@@ -253,6 +253,12 @@ export class TelegramBridge {
   private readonly pendingProject = new Set<number>()
   /** chatId → какие события присылать: всё, только ошибки или ничего. */
   private readonly notifyPrefs = new Map<string, 'all' | 'errors' | 'off'>()
+  /** chatId → за какими сессиями следить: только за привязанной или за всеми. */
+  private readonly notifyScope = new Map<string, 'bound' | 'every'>()
+  /** Чаты, которые вообще писали боту: им можно присылать уведомления. */
+  private readonly knownChats = new Set<number>()
+  /** Последний загруженный каталог — источник имён сессий для уведомлений. */
+  private lastCatalog?: CatalogSnapshot
   /** chatId → model awaiting reasoning-effort pick (kept outside picker so list refreshes won't drop it). */
   private readonly pendingModels = new Map<string, ModelOption>()
   private polling = false
@@ -340,7 +346,7 @@ export class TelegramBridge {
       { command: 'new', description: 'Новый диалог в этой области и привязка' },
       { command: 'newproject', description: 'Добавить папку как проект' },
       { command: 'archive', description: 'Убрать сессию в архив' },
-      { command: 'notify', description: 'Уведомления: on / errors / off' },
+      { command: 'notify', description: 'Уведомления: on/errors/off, every/bound' },
       { command: 'cancel', description: 'Закрыть ответы/подтверждения в TG' },
       { command: 'help', description: 'Помощь' },
     ]).then(() => {
@@ -420,6 +426,7 @@ export class TelegramBridge {
       await this.client.sendMessage(chatId, MSG.DENIED)
       return
     }
+    this.rememberChat(chatId)
 
     // Media messages: photos / image documents (optionally with a caption) are
     // admitted into the bound session; other media get an explicit notice.
@@ -556,6 +563,7 @@ export class TelegramBridge {
       await this.client.sendMessage(chatId, MSG.DENIED)
       return
     }
+    this.rememberChat(chatId)
     const data = cq.data ?? ''
     const picker = this.pickers.get(String(chatId))
 
@@ -686,11 +694,53 @@ export class TelegramBridge {
   private async resolveCatalog(): Promise<CatalogSnapshot> {
     try {
       const fromApi = await loadCatalog(this.ctx)
-      if (fromApi) return fromApi
+      if (fromApi) {
+        this.lastCatalog = fromApi
+        return fromApi
+      }
     } catch (err) {
       this.ctx.logger.warn(`dsh-telegram-channel: catalog via apiProxy failed: ${this.redact(err)}`)
     }
-    return catalogFromLiveAgents(this.liveAgents(), this.ctx)
+    const fallback = catalogFromLiveAgents(this.liveAgents(), this.ctx)
+    this.lastCatalog = fallback
+    return fallback
+  }
+
+  /** Chat remembering: any authorized contact may receive notifications. */
+  private rememberChat(chatId: number): void {
+    if (this.knownChats.has(chatId)) return
+    this.knownChats.add(chatId)
+    this.saveBindings()
+  }
+
+  private notifyScopeFor(chatId: number): 'bound' | 'every' {
+    return this.notifyScope.get(String(chatId)) ?? 'every'
+  }
+
+  /** Human name of a session for lifecycle notifications. */
+  private sessionLabel(sessionId: string): string {
+    const bound = [...this.bindings.values()].find((b) => b.sessionId === sessionId)
+    if (bound?.label) return bound.label
+    const fromCatalog = this.lastCatalog?.sessionsById.get(sessionId)?.title
+    if (fromCatalog) return fromCatalog
+    return `…${sessionId.slice(-8)}`
+  }
+
+  /**
+   * Chats that must hear about lifecycle events of this session: those bound
+   * to it, plus every chat following "every session" (the default), so a task
+   * started on the desktop still pings the phone.
+   */
+  private lifecycleTargets(sessionId: string): number[] {
+    const chats = new Set<number>()
+    for (const b of this.bindings.values()) {
+      if (b.sessionId === sessionId) chats.add(b.chatId)
+    }
+    for (const chatId of this.knownChats) {
+      if (this.notifyPrefs.get(String(chatId)) === 'off') continue
+      if (this.notifyScopeFor(chatId) === 'every') chats.add(chatId)
+    }
+    return [...chats]
   }
 
   private async sendWorkspacePicker(chatId: number, existing?: CatalogSnapshot): Promise<void> {
@@ -1435,7 +1485,9 @@ export class TelegramBridge {
   private async onSessionEvent(session: SessionLike, event: SessionEvent): Promise<void> {
     const id = String(session.id)
     const targets = [...this.bindings.values()].filter((b) => b.sessionId === id)
-    if (targets.length === 0) return
+    const lifecycle = this.lifecycleTargets(id)
+    // Content (assistant text, tool progress) stays bound-only; lifecycle goes wider.
+    if (targets.length === 0 && !(lifecycle.length > 0 && event.type === 'turn/end')) return
 
     if (event.type === 'turn/start') {
       // Typing heartbeat — one sendChatAction expires in ~5s, so refresh it
@@ -1449,26 +1501,28 @@ export class TelegramBridge {
       this.busySessions.delete(id)
       this.thinkingSessions.delete(id)
       for (const b of targets) this.stopTypingHeartbeat(b.chatId)
+      const label = this.sessionLabel(id)
       // Abnormal endings (API failure / abort / crash-recovery) must be
       // visible on the phone — previously they ended in silence.
       const reason = event.data?.reason as { kind?: string; error?: { message?: string; code?: string }; reason?: { kind?: string } } | undefined
       const kind = reason?.kind
-      for (const b of targets) {
-        const mode = this.notificationMode(b.chatId)
+      const lifecycleSet = new Set(lifecycle)
+      for (const chatId of lifecycleSet) {
+        const mode = this.notificationMode(chatId)
         if (mode === 'off') continue
         if (kind === 'error') {
-          this.enqueueNotice(b.chatId, this.describeTurnError(reason?.error))
+          this.enqueueNotice(chatId, `${this.describeTurnError(reason?.error)}\nСессия: ${label}`)
         } else if (kind === 'completed') {
-          if (mode === 'all') this.enqueueNotice(b.chatId, '✅ Сессия завершила работу')
+          if (mode === 'all') this.enqueueNotice(chatId, `✅ Сессия завершила работу — ${label}`)
         } else if (kind === 'max-tokens') {
-          this.enqueueNotice(b.chatId, '⚠️ Достигнут лимит выходных токенов — ход закрыт')
+          this.enqueueNotice(chatId, `⚠️ Достигнут лимит выходных токенов — ход закрыт\nСессия: ${label}`)
         } else if (kind === 'blocked') {
-          this.enqueueNotice(b.chatId, '⛔ Ход заблокирован хостом (сессия в архиве или работа остановлена)')
+          this.enqueueNotice(chatId, `⛔ Ход заблокирован хостом (сессия в архиве или работа остановлена)\nСессия: ${label}`)
         } else if (kind === 'aborted') {
           const manual = reason?.reason?.kind === 'user'
-          if (mode === 'all') this.enqueueNotice(b.chatId, manual ? '⏹ Ход остановлен вручную' : '⏹ Ход прерван')
+          if (mode === 'all') this.enqueueNotice(chatId, manual ? `⏹ Ход остановлен вручную — ${label}` : `⏹ Ход прерван — ${label}`)
         } else if (kind === 'interrupted') {
-          this.enqueueNotice(b.chatId, '⚠️ Сессия оборвалась: аварийное завершение (восстановление после сбоя), ход помечен прерванным')
+          this.enqueueNotice(chatId, `⚠️ Сессия оборвалась: аварийное завершение (восстановление после сбоя), ход помечен прерванным\nСессия: ${label}`)
         }
       }
       return
@@ -1714,9 +1768,10 @@ export class TelegramBridge {
     next: () => Promise<unknown>,
   ): Promise<unknown> {
     const sessionId = request?.agent?.id !== undefined ? String(request.agent.id) : undefined
-    const hasBoundChat = sessionId !== undefined
-      && [...this.bindings.values()].some((binding) => binding.sessionId === sessionId)
-    if (!hasBoundChat || !Array.isArray(request.questions) || request.questions.length === 0) {
+    // Phone side is offered the question when the chat is bound to that session
+    // OR follows every session (desktop-started tasks included).
+    const wantedChat = sessionId !== undefined && this.lifecycleTargets(sessionId).length > 0
+    if (!wantedChat || !Array.isArray(request.questions) || request.questions.length === 0) {
       return next()
     }
 
@@ -1770,11 +1825,12 @@ export class TelegramBridge {
     }
     req.signal?.addEventListener('abort', onAbort, { once: true })
     if (sessionId !== undefined && questions.length > 0) {
+      const label = this.sessionLabel(sessionId)
       let asked = false
-      for (const [chatId, binding] of this.bindings) {
-        if (binding.sessionId !== sessionId) continue
+      for (const chatId of this.lifecycleTargets(sessionId)) {
+        if (this.notificationMode(chatId) === 'off') continue
         this.pendingAsks.set(String(chatId), { req: request, sessionId, questions, ask, at: Date.now() })
-        this.enqueueNotice(Number(chatId), this.formatAskPending(questions))
+        this.enqueueNotice(chatId, `${this.formatAskPending(questions)}\nСессия: ${label}`)
         asked = true
       }
       if (asked) return { promise, reject: rejectFn }
@@ -2154,10 +2210,23 @@ export class TelegramBridge {
     return true
   }
 
-  /** /notify: what this chat receives about the bound session. */
+  /** /notify: what this chat receives, and about which sessions. */
   private async handleNotifyCommand(chatId: number, arg?: string): Promise<void> {
     const current = this.notificationMode(chatId)
     const wanted = (arg ?? '').trim().toLowerCase()
+    if (wanted === 'every' || wanted === 'all-sessions' || wanted === 'watch') {
+      this.notifyScope.set(String(chatId), 'every')
+      if (this.notificationMode(chatId) === 'off') this.notifyPrefs.set(String(chatId), 'all')
+      this.saveBindings()
+      await this.client.sendMessage(chatId, 'Уведомления: слежу за ВСЕМИ сессиями (включая запущенные с компьютера).')
+      return
+    }
+    if (wanted === 'bound' || wanted === 'session') {
+      this.notifyScope.set(String(chatId), 'bound')
+      this.saveBindings()
+      await this.client.sendMessage(chatId, 'Уведомления: только за привязанной сессией.')
+      return
+    }
     if (wanted === 'on' || wanted === 'all') {
       this.notifyPrefs.set(String(chatId), 'all')
       this.saveBindings()
@@ -2176,7 +2245,8 @@ export class TelegramBridge {
       await this.client.sendMessage(chatId, MSG.NOTIFY_SET('off'))
       return
     }
-    await this.client.sendMessage(chatId, MSG.NOTIFY_STATE(current))
+    const scope = this.notifyScopeFor(chatId) === 'every' ? 'все сессии' : 'только привязанная'
+    await this.client.sendMessage(chatId, `${MSG.NOTIFY_STATE(current)}\nОбласть: ${scope}.\nСменить: /notify every | bound`)
   }
 
   private notificationMode(chatId: number): 'all' | 'errors' | 'off' {
@@ -2222,6 +2292,8 @@ export class TelegramBridge {
         bindings: Object.fromEntries(this.bindings),
         renderPrefs: Object.fromEntries(this.renderPrefs),
         notifyPrefs: Object.fromEntries(this.notifyPrefs),
+        notifyScope: Object.fromEntries(this.notifyScope),
+        knownChats: [...this.knownChats],
       }
       mkdirSync(dirname(this.bindingsPath()), { recursive: true })
       writeFileSync(this.bindingsPath(), JSON.stringify(obj, null, 2))
@@ -2238,6 +2310,8 @@ export class TelegramBridge {
         bindings?: Record<string, { chatId?: number; sessionId?: string; label?: string }>
         renderPrefs?: Record<string, string>
         notifyPrefs?: Record<string, string>
+        notifyScope?: Record<string, string>
+        knownChats?: number[]
       }
       // Legacy files (pre-renderPrefs) stored the bindings flat at the top level.
       const flat = parsed as Record<string, { chatId?: number; sessionId?: string; label?: string }>
@@ -2262,6 +2336,14 @@ export class TelegramBridge {
         if (mode === 'all' || mode === 'errors' || mode === 'off') {
           this.notifyPrefs.set(String(chatId), mode)
         }
+      }
+      for (const [chatId, scope] of Object.entries(data.notifyScope ?? {})) {
+        if (scope === 'every' || scope === 'bound') {
+          this.notifyScope.set(String(chatId), scope)
+        }
+      }
+      for (const chatId of data.knownChats ?? []) {
+        if (Number.isFinite(chatId)) this.knownChats.add(Number(chatId))
       }
       if (n > 0)
         this.ctx.logger.info(`dsh-telegram-channel: restored ${n} binding(s) from disk`)

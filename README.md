@@ -44,7 +44,9 @@ Telegram-пульт для **DeepSeek Harness**: телефон подключа
   падение с текстом ошибки и подсказкой (кончились токены/квота, лимит запросов,
   модель недоступна, переполнен контекст, сеть, ключ), достижение лимита выходных
   токенов, аварийный обрыв, и вопрос агента («❓ Сессия задала вопрос и ждёт
-  ответа»). Режим переключается: `/notify on | errors | off`.
+  ответа») — с названием сессии. По умолчанию бот **следит за всеми сессиями**,
+  включая запущенные с компьютера; `/notify bound` сужает до привязанной,
+  `/notify on | errors | off` задаёт набор событий.
 
 ## Установка
 
@@ -88,7 +90,8 @@ systemctl restart dsh           # плагин монтируется при с�
 | `/new` | новый диалог в текущей области и привязка |
 | `/newproject <путь> [\| Название]` | добавить папку как проект (рабочую область) |
 | `/archive` | убрать привязанную сессию в архив |
-| `/notify on\|errors\|off` | какие уведомления присылать |
+| `/notify on\|errors\|off` | какие события присылать (всё / только ошибки / ничего) |
+| `/notify every\|bound` | за какими сессиями следить (всеми / только привязанной) |
 | `/projects` | список проектов и сессий (то же, что `/sessions`) |
 | `/unbind` | отвязать телефон (сессия на компьютере остаётся) |
 | `/cancel` | закрыть ответы/подтверждения в Telegram |
@@ -173,8 +176,10 @@ sync/publish workflow.
   a ⚠️ with the error text plus a hint when it fails (quota/tokens exhausted,
   rate limit, model unavailable, context overflow, network, credentials), a
   warning for the output-token ceiling and for crash-orphaned turns, and
-  "❓ the session asked a question and is waiting". Per-chat mode:
-  `/notify on | errors | off`.
+  "❓ the session asked a question and is waiting" — each with the session name.
+  By default the bot **follows every session**, including turns started on the
+  desktop; `/notify bound` narrows it to the attached session, and
+  `/notify on | errors | off` picks the event set.
 
 ## Requirements
 
@@ -246,7 +251,8 @@ the row back to its loader entry and the settings form becomes read-only.
 | `/new` | create a new session in the current workspace and attach to it |
 | `/newproject <path> [\| Title]` | register a folder as a project (workspace) |
 | `/archive` | move the attached session to the archive |
-| `/notify on\|errors\|off` | which notifications this chat receives |
+| `/notify on\|errors\|off` | which events this chat receives (all / errors only / none) |
+| `/notify every\|bound` | which sessions to follow (all / attached only) |
 | `/projects` | project/session list (alias of `/sessions`) |
 | `/unbind` | detach the phone; the desktop session keeps running |
 | `/cancel` | close Telegram-side questions/approvals (they stay answerable in the web UI) |
