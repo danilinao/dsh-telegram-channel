@@ -86,9 +86,13 @@ for f in lib/*.js; do node --check "$f"; done
 ## Установка и версия
 
 ```bash
-dsh plugin --profile web add link:/home/alexey/dsh-plugins/dsh-telegram-channel
+dsh plugin --profile web add link:/home/alexey/projects/tg-bot-dsh
 systemctl restart dsh        # плагин монтируется только при старте
 ```
+
+> Переезд 2026-10-21: код лежит в `/home/alexey/projects/tg-bot-dsh`, а на
+> старом месте `/home/alexey/dsh-plugins/dsh-telegram-channel` оставлен симлинк
+> на него — профиль `web` по-прежнему ссылается на старый путь.
 
 DSH проверяет совместимость по **точной** версии пакета, поэтому для `0.4.0`
 выдано исключение:
