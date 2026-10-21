@@ -119,6 +119,125 @@ function projectionTitle(summary: {
   return undefined
 }
 
+/** Host services that DSH >= 0.2 exposes instead of the old `apiProxy`. */
+interface HostServices {
+  sessionController?: {
+    list?: (signal?: AbortSignal) => Promise<SessionListItem[]>
+    projections?: (request: { sessionId: string }, signal?: AbortSignal) => Promise<ProjectionBlock | null>
+  }
+  workspaceRegistry?: {
+    list?: () => Array<{ id: string; path: string; title: string; sessionIds: string[] }>
+    archivedSessionIds?: string[]
+  }
+}
+
+interface ProjectionBlock {
+  kind?: string
+  values?: {
+    title?: string | null
+    titleInput?: { first?: { text?: string } | null } | null
+  }
+}
+
+interface SessionListItem {
+  sessionId: string
+  updatedAt?: number
+  running?: boolean
+  blank?: boolean
+  origin?: string
+  cwd?: string
+  projections?: ProjectionBlock
+}
+
+/** Read a host service defensively: `ctx.get` throws for services it cannot see. */
+function hostService<T>(ctx: Context, name: string): T | undefined {
+  const get = (ctx as Context & { get?: (service: string, strict?: boolean) => unknown }).get
+  if (typeof get !== 'function') return undefined
+  try {
+    return (get.call(ctx, name) as T | undefined) ?? undefined
+  } catch {
+    return undefined
+  }
+}
+
+function hostServices(ctx: Context): HostServices {
+  return {
+    sessionController: hostService<HostServices['sessionController']>(ctx, 'sessionController'),
+    workspaceRegistry: hostService<HostServices['workspaceRegistry']>(ctx, 'workspaceRegistry'),
+  }
+}
+
+/**
+ * Catalog straight from host services — the 0.2.x path.
+ *
+ * `dsh` 0.2 removed the `apiProxy` service the 0.1.x plugin talked to, so the
+ * old RPC route silently degrades to "только запущенные сессии". The Web UI
+ * itself reads `workspaceRegistry` (ordering + archive set) and
+ * `sessionController.list()` (every stored session with its projections), and
+ * both are plain host services we can call the same way.
+ */
+async function loadCatalogFromHost(ctx: Context): Promise<CatalogSnapshot | undefined> {
+  const { sessionController, workspaceRegistry } = hostServices(ctx)
+  const listSessions = sessionController?.list
+  const listWorkspaces = workspaceRegistry?.list
+  if (typeof listSessions !== 'function' || typeof listWorkspaces !== 'function') return undefined
+
+  let items: SessionListItem[]
+  let registry: Array<{ id: string; path: string; title: string; sessionIds: string[] }>
+  try {
+    items = await listSessions.call(sessionController)
+    registry = listWorkspaces.call(workspaceRegistry)
+  } catch {
+    return undefined
+  }
+  if (!Array.isArray(items) || !Array.isArray(registry)) return undefined
+
+  const archivedIds = new Set<string>()
+  for (const id of workspaceRegistry?.archivedSessionIds ?? []) archivedIds.add(String(id))
+
+  const sessionsById = new Map<string, SessionRow>()
+  for (const item of items) {
+    const sessionId = String(item.sessionId)
+    if (!sessionId) continue
+    sessionsById.set(sessionId, {
+      sessionId,
+      title: titleOf({ ...item, sessionId, updatedAt: Number(item.updatedAt) || 0 }),
+      named: projectionTitle({ projections: item.projections }) !== undefined,
+      cwd: item.cwd,
+      blank: Boolean(item.blank),
+      running: Boolean(item.running),
+      origin: item.origin,
+      updatedAt: Number(item.updatedAt) || 0,
+    })
+  }
+
+  const workspaces: WorkspaceRow[] = registry.map((w) => ({
+    id: String(w.id),
+    title: w.title || workspaceName(w.path) || String(w.id),
+    path: w.path,
+    sessionIds: (w.sessionIds ?? []).map(String),
+  }))
+
+  return { workspaces, sessionsById, archivedIds, complete: true }
+}
+
+/** `sessionController.projections` — the 0.2.x way to name a cold session. */
+async function resolveSessionTitleFromHost(
+  ctx: Context,
+  sessionId: string,
+): Promise<string | undefined> {
+  const controller = hostServices(ctx).sessionController
+  const call = controller?.projections
+  if (typeof call !== 'function') return undefined
+  try {
+    const block = await call.call(controller, { sessionId })
+    if (!block) return undefined
+    return projectionTitle({ projections: block })
+  } catch {
+    return undefined
+  }
+}
+
 /**
  * Ask the host for one session's projections. Cold sessions often arrive in
  * `sessions.list` without a projection block, so this is what puts a real name
@@ -130,12 +249,12 @@ export async function resolveSessionTitle(
 ): Promise<string | undefined> {
   const api = resolveApiProxy(ctx)
   const call = api?.sessions?.projections
-  if (typeof call !== 'function') return undefined
+  if (typeof call !== 'function') return await resolveSessionTitleFromHost(ctx, sessionId)
   try {
     const raw = await call({ rpcId: randomUUID(), payload: { sessionId } })
-    const value = unwrap<{ values?: { title?: string | null; titleInput?: { first?: { text?: string } | null } | null } }>(raw)
+    const value = unwrap<ProjectionBlock>(raw)
     if (!value) return undefined
-    return projectionTitle({ projections: { values: value.values } })
+    return projectionTitle({ projections: value })
   } catch {
     return undefined
   }
@@ -147,7 +266,8 @@ export async function loadCatalog(ctx: Context): Promise<CatalogSnapshot | undef
 
   const wsPromise = rpcCall(api?.workspace?.list, {})
   const sessPromise = rpcCall(api?.sessions?.list, {})
-  if (!wsPromise || !sessPromise) return undefined
+  // No apiProxy (dsh >= 0.2) → read the same data from host services.
+  if (!wsPromise || !sessPromise) return loadCatalogFromHost(ctx)
 
   const [wsRaw, sessRaw] = await Promise.all([wsPromise, sessPromise])
   const wsVal = unwrap<{
