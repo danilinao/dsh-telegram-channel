@@ -222,10 +222,11 @@ function lastContextKeyboard(): InlineKeyboardMarkup {
 
 const defaultSleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
 
-function contentToText(content: readonly ContentBlock[]): string {
+function contentToText(content: unknown): string {
+  if (!Array.isArray(content)) return ''
   return content
-    .filter((block): block is TextBlock => block.type === 'text')
-    .map((block) => block.text)
+    .filter((block): block is TextBlock => (block as { type?: string })?.type === 'text')
+    .map((block) => (block as TextBlock).text)
     .join('')
 }
 
@@ -372,12 +373,18 @@ export class TelegramBridge {
       this.ctx.logger.warn(`dsh-telegram-channel: setMyCommands failed: ${this.redact(err)}`)
     })
     // Bot profile card (what a stranger sees before /start) — empty by default.
-    void this.client.setMyShortDescription(
-      'Telegram-пульт для DeepSeek Harness: та же сессия, что на компьютере',
-    ).catch((err) => {
-      this.ctx.logger.warn(`dsh-telegram-channel: setMyShortDescription failed: ${this.redact(err)}`)
-    })
-    void this.client.setMyDescription([
+    // Optional on purpose: a partial client/mock without these methods must not
+    // break start-up (the card is cosmetic).
+    const card = this.client as Partial<TelegramClientLike>
+    if (typeof card.setMyShortDescription === 'function') {
+      void card.setMyShortDescription(
+        'Telegram-пульт для DeepSeek Harness: та же сессия, что на компьютере',
+      ).catch((err) => {
+        this.ctx.logger.warn(`dsh-telegram-channel: setMyShortDescription failed: ${this.redact(err)}`)
+      })
+    }
+    if (typeof card.setMyDescription !== 'function') return
+    void card.setMyDescription([
       'Пульт для DeepSeek Harness: телефон подключается к уже идущей сессии на компьютере.',
       'Один диалог, две стороны — Web и Telegram видят одну и ту же переписку.',
       '',
@@ -919,9 +926,10 @@ export class TelegramBridge {
       }
       const title = await resolveSessionTitle(this.ctx, row.sessionId, row.cwd)
       if (!title) {
-        // No name anywhere: if the log carries no user message at all, the
-        // session is empty — hide it instead of showing an id tail.
-        if (!row.named && !sessionLogInfo(row.sessionId, row.cwd).hasUserMessage) row.blank = true
+        // No name anywhere: a *cold* session whose log carries no user message
+        // is empty — hide it instead of showing an id tail. A running session is
+        // never blank: its log may simply not be on disk yet.
+        if (!row.named && !row.running && !sessionLogInfo(row.sessionId, row.cwd).hasUserMessage) row.blank = true
         return
       }
       this.titleCache.set(row.sessionId, { at: row.updatedAt, title })
@@ -1744,14 +1752,18 @@ export class TelegramBridge {
       return
     }
 
-    if (event.type === 'assistant/chunk') {
+    // `assistant/chunk` and `todo/write` exist at runtime but are missing from the
+    // narrowed SessionEvent union of @deepseek-ai/dsh-session, so widen once.
+    if ((event.type as string) === 'assistant/chunk') {
       // Thinking indicator: once per reasoning phase, status only (no content).
-      const chunk = event.data?.chunk as { type?: string; block?: { type?: string } } | undefined
+      const chunk = (event as unknown as {
+        data?: { chunk?: { type?: string; block?: { type?: string }; text?: unknown } }
+      }).data?.chunk
       const ctype = String(chunk?.type ?? '')
       const btype = String(chunk?.block?.type ?? '')
       const isReasoning = ctype.includes('reasoning') || btype.includes('reasoning') || btype.includes('think')
       if (isReasoning) {
-        const delta = (chunk as { text?: unknown } | undefined)?.text
+        const delta = chunk?.text
         if (typeof delta === 'string' && delta.length > 0) {
           this.reasoningBuffers.set(id, (this.reasoningBuffers.get(id) ?? '') + delta)
         }
@@ -1776,9 +1788,12 @@ export class TelegramBridge {
       return
     }
 
-    if (event.type === 'todo/write') {
-      const todos = Array.isArray(event.data?.todos) ? event.data.todos : []
-      this.lastTodos.set(id, todos as Array<{ content?: string; status?: string }>)
+    if ((event.type as string) === 'todo/write') {
+      const todoData = (event as unknown as {
+        data?: { todos?: Array<{ content?: string; status?: string }> }
+      }).data
+      const todos: Array<{ content?: string; status?: string }> = Array.isArray(todoData?.todos) ? todoData.todos : []
+      this.lastTodos.set(id, todos)
       if (todos.length === 0) return
       const done = todos.filter((t) => t?.status === 'completed').length
       const current = todos.find((t) => t?.status === 'in_progress') ?? todos.find((t) => t?.status === 'pending')

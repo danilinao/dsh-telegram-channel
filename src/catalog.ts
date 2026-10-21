@@ -443,8 +443,8 @@ async function resolveSessionTitleFromHost(
   if (typeof call !== 'function') return undefined
   try {
     const block = await call.call(controller, { sessionId })
-    if (!block) return readTitleFromSessionLog(sessionId, cwd)
-    return projectionTitle({ projections: block }) ?? readTitleFromSessionLog(sessionId, cwd)
+    if (!block) return readTitleFromSessionLog(sessionId)
+    return projectionTitle({ projections: block }) ?? readTitleFromSessionLog(sessionId)
   } catch {
     return undefined
   }
@@ -641,7 +641,7 @@ export async function loadCatalog(ctx: Context): Promise<CatalogSnapshot | undef
     sessionsById.set(sessionId, {
       sessionId,
       title: titleOf({ ...item, sessionId }),
-      named: projectionTitle({ ...item, sessionId }) !== undefined,
+      named: projectionTitle({ projections: item.projections }) !== undefined,
       cwd: item.cwd,
       blank: Boolean(item.blank),
       running: Boolean(item.running),
@@ -701,6 +701,9 @@ export function catalogFromLiveAgents(agents: Agent[], ctx?: Context): CatalogSn
     sessionsById.set(sessionId, {
       sessionId,
       title: parts.title || parts.workspace || sessionId,
+      // The agent itself carries the name, so this row needs no host lookup —
+      // and must never be judged "blank" just because it has no log on disk yet.
+      named: true,
       cwd: parts.cwd,
       blank: false,
       running: true,
