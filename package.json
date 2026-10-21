@@ -1,6 +1,6 @@
 {
   "name": "dsh-telegram-channel",
-  "version": "0.7.2",
+  "version": "0.8.0",
   "description": "Telegram-пульт для DeepSeek Harness: живая Web-сессия на телефоне — русский интерфейс, архивные сессии скрыты, имя сессии на кнопке",
   "keywords": [
     "telegram",
@@ -31,7 +31,7 @@
     "url": "git+https://github.com/danilinao/dsh-telegram-channel.git"
   },
   "bugs": {
-    "url": "https://github.com/hi-wenw/dsh-telegram-channel/issues"
+    "url": "https://github.com/danilinao/dsh-telegram-channel/issues"
   },
   "homepage": "https://github.com/danilinao/dsh-telegram-channel#readme",
   "type": "module",
@@ -46,10 +46,13 @@
   },
   "files": [
     "lib",
+    "src",
     "scripts",
     "cordis.patch.yml",
     "README.md",
     "UPSTREAM.md",
+    "BUILD.md",
+    "CHANGELOG.md",
     "LICENSE"
   ],
   "license": "MIT",
@@ -60,25 +63,29 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "node --import tsx --test tests/**/*.test.ts",
+    "clean": "rm -rf lib",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "prepublishOnly": "npm run build"
+    "test": "node --import tsx --test tests/*.test.ts",
+    "test:native": "node --test tests/",
+    "check": "npm run typecheck && npm run build && npm test && npm run test:lib",
+    "prepublishOnly": "npm run clean && npm run build && npm test && npm run test:lib",
+    "test:lib": "node --import tsx --test tests/lib/*.test.ts"
   },
   "peerDependencies": {
-    "@deepseek-ai/cordis": "^4.0.1",
-    "@deepseek-ai/dsh-agent": "^0.1.0-rc.6",
-    "@deepseek-ai/dsh-llm": "^0.0.1-rc.1",
-    "@deepseek-ai/dsh-session": "^0.0.1-rc.1",
-    "@deepseek-ai/schemastery": "^3.18.1"
+    "@deepseek-ai/cordis": "^4.0.5-alpha.1",
+    "@deepseek-ai/dsh-agent": "^0.2.1-alpha.2",
+    "@deepseek-ai/dsh-llm": "^0.2.1-alpha.2",
+    "@deepseek-ai/dsh-session": "^0.2.1-alpha.2",
+    "@deepseek-ai/schemastery": "^3.18.5-alpha.1"
   },
   "devDependencies": {
-    "@deepseek-ai/cordis": "^4.0.1",
-    "@deepseek-ai/dsh-agent": "^0.1.0-rc.6",
-    "@deepseek-ai/dsh-llm": "^0.0.1-rc.1",
-    "@deepseek-ai/dsh-session": "^0.0.1-rc.1",
-    "@deepseek-ai/schemastery": "^3.18.1",
-    "@types/node": "^22.0.0",
-    "tsx": "^4.19.0",
+    "@deepseek-ai/cordis": "4.0.5-alpha.1",
+    "@deepseek-ai/dsh-agent": "0.2.1-alpha.2",
+    "@deepseek-ai/dsh-llm": "0.2.1-alpha.2",
+    "@deepseek-ai/dsh-session": "0.2.1-alpha.2",
+    "@deepseek-ai/schemastery": "3.18.5-alpha.1",
+    "@types/node": "^26.6.5",
+    "tsx": "^4.23.15",
     "typescript": "^5.9.0"
   },
   "engines": {

@@ -26,6 +26,22 @@ export declare class TelegramBridge {
     private readonly renderPrefs;
     private readonly bindings;
     private readonly pickers;
+    /** Session names fetched from host projections, keyed by id and updatedAt. */
+    private readonly titleCache;
+    /** chatId → ждём путь нового проекта следующим сообщением. */
+    private readonly pendingProject;
+    /** chatId → какие события присылать: всё, только ошибки или ничего. */
+    private readonly notifyPrefs;
+    /** chatId → за какими сессиями следить: только за привязанной или за всеми. */
+    private readonly notifyScope;
+    /** Чаты, которые вообще писали боту: им можно присылать уведомления. */
+    private readonly knownChats;
+    /** Последний загруженный каталог — источник имён сессий для уведомлений. */
+    private lastCatalog?;
+    /** sessionId → накопленные рассуждения текущего шага (уходят спойлером). */
+    private readonly reasoningBuffers;
+    /** chatId → курсор для листания истории (beforeSeq) и признак «есть ещё». */
+    private readonly historyCursors;
     /** chatId → model awaiting reasoning-effort pick (kept outside picker so list refreshes won't drop it). */
     private readonly pendingModels;
     private polling;
@@ -63,8 +79,46 @@ export declare class TelegramBridge {
     processUpdate(update: TelegramUpdate): Promise<void>;
     private handleCallback;
     private resolveCatalog;
+    /** Chat remembering: any authorized contact may receive notifications. */
+    private rememberChat;
+    private notifyScopeFor;
+    /** Human name of a session for lifecycle notifications. */
+    /**
+     * Async label for notifications: when the catalog row has no real title yet
+     * (`named === false`), ask the host for the session projections — that yields
+     * the session title or its first message instead of an id tail. The result is
+     * cached back into the catalog row so later events are cheap.
+     */
+    private sessionLabelFor;
+    private sessionLabel;
+    /** Project (workspace) a session belongs to: registry match, else cwd basename. */
+    private projectLabel;
+    /** Warm the catalog so notifications can name sessions and projects. */
+    private prefetchCatalog;
+    /**
+     * Chats that must hear about lifecycle events of this session: those bound
+     * to it, plus every chat following "every session" (the default), so a task
+     * started on the desktop still pings the phone.
+     */
+    private lifecycleTargets;
     private sendWorkspacePicker;
+    /**
+     * Button caption for one session: `N. <name> <state>`. The name is the Web
+     * session title (the catalog falls back to `workspace · date`), so the phone
+     * list reads like the desktop sidebar instead of bare numbers.
+     * ▶ = the session is live in memory, ▷ = parked (resumed on attach).
+     */
+    private sessionButtonText;
+    /**
+     * Fill in real session names for the rows the picker is about to show.
+     * `sessions.list` leaves cold sessions without a projection block, so ask the
+     * host per session (cached by updatedAt) — that is what makes a button read
+     * like the Web sidebar instead of "workspace · date".
+     */
+    private ensureSessionNames;
     private sendSessionPicker;
+    /** Archived sessions of one workspace, each with a restore button. */
+    private sendArchivedInWorkspace;
     private bindSession;
     private sendLastTurn;
     private sendModelPicker;
@@ -143,8 +197,50 @@ export declare class TelegramBridge {
     private handleTgApproval;
     private stopBound;
     private sendMission;
+    /** /history [beforeSeq]: показать предыдущие сообщения сессии. */
+    private handleHistoryCommand;
     /** /new: create a session in the bound session's workspace and attach to it. */
     private newSessionHere;
+    /**
+     * Create a session in a workspace (or a directory) and bind the chat to it.
+     * Works on both host generations: `sessionController.create` on DSH 0.2 and
+     * `apiProxy.sessions.create` on 0.1.x.
+     */
+    private createSessionInTarget;
+    /** /newproject: add a directory to the workspace registry (DSH 0.2). */
+    private createWorkspaceFromText;
+    /** /archive: move the bound session to the archive and unbind the chat. */
+    private archiveBound;
+    /**
+     * Archive one session through the host registry. `stopActivity` is requested
+     * so a running session is stopped instead of being refused: an archived
+     * session must not keep burning tokens.
+     */
+    private archiveSessionById;
+    /** /notify: what this chat receives, and about which sessions. */
+    private handleNotifyCommand;
+    private notificationMode;
+    /** Human explanation for a failed turn, with a hint for the usual causes. */
+    private describeTurnError;
+    /** «1 сессия / 2 сессии / 5 сессий» */
+    private ruCount;
+    /** Send pre-built HTML; if Telegram rejects the markup, fall back to plain. */
+    private sendHtml;
+    /** Collapsible block: Telegram shows it as "expandable quote", hidden by default. */
+    private spoilerBlock;
+    /** Flush accumulated reasoning of one session as a spoiler block. */
+    private flushReasoning;
+    /** List archived sessions with one-tap restore. */
+    private sendArchivedPicker;
+    /** Restore one session from the archive (host registry, DSH 0.2). */
+    private unarchiveSessionById;
+    /**
+     * One page of real session history (user/assistant messages and tool calls as
+     * spoilers) via the host session controller, newest page by default.
+     */
+    private fetchHistoryPage;
+    /** Send a history page to the chat, with a "earlier" button when available. */
+    private sendHistoryPage;
     private bindingsPath;
     private saveBindings;
     private loadBindings;
