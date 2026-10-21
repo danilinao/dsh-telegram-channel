@@ -10,6 +10,7 @@ import type { ContentBlock, TextBlock } from '@deepseek-ai/dsh-llm/types'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session/types'
 import { isAuthorized } from './auth.js'
 import { resolveApiProxy } from './apiproxy.js'
+import {
   catalogFromLiveAgents,
   resolveSessionTitle,
   loadCatalog,
