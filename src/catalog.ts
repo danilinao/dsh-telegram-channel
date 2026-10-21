@@ -1,4 +1,7 @@
 import { randomUUID } from 'node:crypto'
+import { appendFileSync, mkdirSync, statSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { resolveApiProxy } from './apiproxy.js'
@@ -149,15 +152,62 @@ interface SessionListItem {
   projections?: ProjectionBlock
 }
 
-/** Read a host service defensively: `ctx.get` throws for services it cannot see. */
-export function hostService<T>(ctx: Context, name: string): T | undefined {
-  const get = (ctx as Context & { get?: (service: string, strict?: boolean) => unknown }).get
-  if (typeof get !== 'function') return undefined
+/**
+ * Diagnostics land in a file: the cordis logger does not reach the journal, so
+ * a silent fallback would otherwise be invisible.
+ */
+export function debugLog(line: string): void {
   try {
-    return (get.call(ctx, name) as T | undefined) ?? undefined
+    const home = process.env.DSH_HOME ?? join(homedir(), '.dsh')
+    const file = join(home, 'telegram-channel-debug.log')
+    try {
+      if (statSync(file).size > 256_000) return
+    } catch {
+      mkdirSync(join(file, '..'), { recursive: true })
+    }
+    appendFileSync(file, `${new Date().toISOString()} ${line}\n`)
   } catch {
-    return undefined
+    // diagnostics must never break the bot
   }
+}
+
+type ServiceReader = Context & {
+  get?: (service: string, strict?: boolean) => unknown
+  root?: { get?: (service: string, strict?: boolean) => unknown }
+}
+
+/**
+ * Read a host service through every route cordis offers: strict `get`, loose
+ * `get(name, false)` (returns services whose providing fiber is not ACTIVE),
+ * the plain property, and the root context. Each attempt is logged, so a
+ * fallback is explainable after the fact instead of silent.
+ */
+export function hostService<T>(ctx: Context, name: string): T | undefined {
+  const reader = ctx as ServiceReader
+  const attempts: Array<[string, () => unknown]> = [
+    ['get', () => (typeof reader.get === 'function' ? reader.get.call(ctx, name) : undefined)],
+    ['get-loose', () => (typeof reader.get === 'function' ? reader.get.call(ctx, name, false) : undefined)],
+    ['property', () => (reader as unknown as Record<string, unknown>)[name]],
+    ['root-get-loose', () => {
+      const root = reader.root
+      return typeof root?.get === 'function' ? root.get.call(root, name, false) : undefined
+    }],
+  ]
+  for (const [label, read] of attempts) {
+    let value: unknown
+    try {
+      value = read()
+    } catch (err) {
+      debugLog(`hostService ${name} [${label}]: threw ${String(err)}`)
+      continue
+    }
+    if (value !== undefined && value !== null) {
+      debugLog(`hostService ${name} [${label}]: ok`)
+      return value as T
+    }
+    debugLog(`hostService ${name} [${label}]: undefined`)
+  }
+  return undefined
 }
 
 function hostServices(ctx: Context): HostServices {
@@ -180,6 +230,10 @@ async function loadCatalogFromHost(ctx: Context): Promise<CatalogSnapshot | unde
   const { sessionController, workspaceRegistry } = hostServices(ctx)
   const listSessions = sessionController?.list
   const listWorkspaces = workspaceRegistry?.list
+  debugLog(
+    `loadCatalogFromHost: sessionController=${sessionController ? 'yes' : 'no'} list=${typeof listSessions} ` +
+    `workspaceRegistry=${workspaceRegistry ? 'yes' : 'no'} list=${typeof listWorkspaces}`,
+  )
   if (typeof listSessions !== 'function' || typeof listWorkspaces !== 'function') return undefined
 
   let items: SessionListItem[]
@@ -187,10 +241,14 @@ async function loadCatalogFromHost(ctx: Context): Promise<CatalogSnapshot | unde
   try {
     items = await listSessions.call(sessionController)
     registry = listWorkspaces.call(workspaceRegistry)
-  } catch {
+  } catch (err) {
+    debugLog(`loadCatalogFromHost: list() threw ${String(err)}`)
     return undefined
   }
-  if (!Array.isArray(items) || !Array.isArray(registry)) return undefined
+  if (!Array.isArray(items) || !Array.isArray(registry)) {
+    debugLog(`loadCatalogFromHost: unexpected shapes items=${typeof items} registry=${typeof registry}`)
+    return undefined
+  }
 
   const archivedIds = new Set<string>()
   for (const id of workspaceRegistry?.archivedSessionIds ?? []) archivedIds.add(String(id))
@@ -218,6 +276,9 @@ async function loadCatalogFromHost(ctx: Context): Promise<CatalogSnapshot | unde
     sessionIds: (w.sessionIds ?? []).map(String),
   }))
 
+  debugLog(
+    `loadCatalogFromHost: ok sessions=${items.length} workspaces=${registry.length} archived=${archivedIds.size}`,
+  )
   return { workspaces, sessionsById, archivedIds, complete: true }
 }
 
@@ -268,7 +329,10 @@ export async function loadCatalog(ctx: Context): Promise<CatalogSnapshot | undef
   const wsPromise = rpcCall(api?.workspace?.list, {})
   const sessPromise = rpcCall(api?.sessions?.list, {})
   // No apiProxy (dsh >= 0.2) → read the same data from host services.
-  if (!wsPromise || !sessPromise) return loadCatalogFromHost(ctx)
+  if (!wsPromise || !sessPromise) {
+    debugLog(`loadCatalog: apiProxy unavailable (workspace.list=${typeof api?.workspace?.list}, sessions.list=${typeof api?.sessions?.list}) → host services`)
+    return loadCatalogFromHost(ctx)
+  }
 
   const [wsRaw, sessRaw] = await Promise.all([wsPromise, sessPromise])
   const wsVal = unwrap<{
