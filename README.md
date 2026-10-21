@@ -48,8 +48,13 @@ Telegram-пульт для **DeepSeek Harness**: телефон подключа
   сообщения диалога; кнопка «⬅ Раньше» листает глубже, `/history [seq]` — тоже
   вручную. В истории видны реплики пользователя, ответы ассистента и вызовы
   инструментов (спойлером).
-- **Возврат из архива.** `/archived` показывает архивные сессии с кнопкой «↩» —
-  сессия возвращается в список и снова доступна в Web.
+- **Архив отдельно от списка.** В списке сессий области только неархивные; ниже
+  кнопка «🗂 Архивные (N)» — она открывает архив **этой области** с кнопкой «↩»
+  (вернуть) и «← К сессиям». Глобальный архив тоже доступен: `/archived`.
+- **Осмысленные имена сессий.** Если у сессии нет заголовка и проекций, имя
+  берётся из её журнала на диске — первое сообщение пользователя. Поэтому в
+  списке видно «Проект: … Synthriders — Beatmap Studio…», а не один и тот же
+  «Synthriders» на все одиннадцать строк; рядом дата и хвост id.
 - **Уведомления о состоянии сессии.** В чат приходит: успешное завершение хода,
   падение с текстом ошибки и подсказкой (кончились токены/квота, лимит запросов,
   модель недоступна, переполнен контекст, сеть, ключ), достижение лимита выходных
@@ -192,8 +197,13 @@ sync/publish workflow.
   messages; the "⬅ Earlier" button pages further back, and `/history [seq]` does
   it manually. User prompts, assistant replies and tool calls (as spoilers) are
   all included.
-- **Restore from the archive.** `/archived` lists archived sessions with a "↩"
-  button that puts the session back into the registry.
+- **Archive kept apart.** The session list shows only non-archived sessions; a
+  "🗂 Архивные (N)" button opens the archive of **that workspace** with "↩"
+  (restore) and "← К сессиям" (back). The global archive is `/archived`.
+- **Meaningful session names.** When a session has neither title nor projections,
+  the name is read from its session log on disk (the first user message), so the
+  list reads "Проект: … Synthriders — Beatmap Studio…" instead of the same
+  project name on every row; the date and id tail follow.
 - **Session state notifications.** The chat receives a ✅ when a turn completes,
   a ⚠️ with the error text plus a hint when it fails (quota/tokens exhausted,
   rate limit, model unavailable, context overflow, network, credentials), a

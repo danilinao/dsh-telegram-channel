@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
-import { appendFileSync, mkdirSync, readFileSync, readdirSync, statSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync } from 'node:fs'
+import * as nodeZlib from 'node:zlib'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
@@ -67,7 +68,7 @@ export function isArchived(archivedIds: Set<string>, sessionId: string): boolean
 }
 
 /** `21.10 14:05` in local time — keeps untitled sessions distinguishable. */
-function shortWhen(ms: number): string | undefined {
+export function shortWhen(ms: number): string | undefined {
   if (!Number.isFinite(ms) || ms <= 0) return undefined
   const d = new Date(ms)
   const pad = (n: number): string => String(n).padStart(2, '0')
@@ -93,13 +94,100 @@ function titleOf(summary: {
 }): string {
   const fromHost = projectionTitle(summary)
   if (fromHost) return fromHost
-  const ws = workspaceName(summary.cwd)
   const when = shortWhen(Number(summary.updatedAt) || 0)
-  if (ws && when) return `${ws} · ${when}`
-  if (ws) return ws
+  // No title anywhere: the project is already in the picker header, so the
+  // session is better named by its time — never repeat the project name.
+  if (when) return `сессия · ${when}`
   const id = String(summary.sessionId)
   const tail = id.length > 12 ? `…${id.slice(-12)}` : id
   return when ? `${when} · ${tail}` : tail
+}
+
+/** Cache of names recovered from on-disk session logs (cold sessions have no projections). */
+const logTitleCache = new Map<string, string | undefined>()
+
+/** DSH stores sessions under `<home>/sessions/<escaped-cwd>/<bare-id>/session.v4.jsonl.zstd`. */
+function escapeCwdForStore(cwd: string): string {
+  const trimmed = cwd.replace(/\/+$/, '')
+  let out = ''
+  for (const ch of trimmed) {
+    if (/[a-zA-Z0-9._-]/.test(ch)) out += ch
+    else if (ch === '/') out += '-'
+    else out += `~${ch.codePointAt(0)!.toString(16).padStart(4, '0')}`
+  }
+  return `--${out.replace(/^-+/, '')}--`
+}
+
+/** Text of a message content payload: string parts joined, other blocks skipped. */
+function textOfContent(content: unknown): string {
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return ''
+  const parts: string[] = []
+  for (const block of content) {
+    const item = block as { type?: string; text?: unknown }
+    if (item?.type === 'text' && typeof item.text === 'string') parts.push(item.text)
+  }
+  return parts.join('\n')
+}
+
+function firstUserTextFromLog(file: string): string | undefined {
+  try {
+    const zstd = (nodeZlib as unknown as { zstdDecompressSync?: (buf: Buffer) => Buffer }).zstdDecompressSync
+    if (typeof zstd !== 'function') return undefined
+    const raw = zstd(readFileSync(file)).toString('utf8')
+    for (const line of raw.split('\n')) {
+      if (!line.trim()) continue
+      let event: { type?: string; data?: { source?: { kind?: string }; content?: unknown; message?: { content?: unknown } } }
+      try {
+        event = JSON.parse(line) as typeof event
+      } catch {
+        continue
+      }
+      if (event.type !== 'user/message') continue
+      if (event.data?.source?.kind !== undefined && event.data.source.kind !== 'user') continue
+      const text = textOfContent(event.data?.message?.content ?? event.data?.content)
+      const flat = text.replace(/\s+/g, ' ').trim()
+      if (flat) {
+        const chars = [...flat]
+        return chars.length > 60 ? `${chars.slice(0, 59).join('')}…` : flat
+      }
+    }
+  } catch {
+    // unreadable / unsupported log — the caller falls back further
+  }
+  return undefined
+}
+
+/**
+ * Recover a session name from its log on disk. Cold sessions have no
+ * projections, so this is what turns "Synthriders" (the project) into the real
+ * first message of each session.
+ */
+export function readTitleFromSessionLog(sessionId: string, cwd?: string): string | undefined {
+  const bare = normalizeSessionId(sessionId)
+  if (logTitleCache.has(bare)) return logTitleCache.get(bare)
+  const home = process.env.DSH_HOME ?? join(homedir(), '.dsh')
+  const root = join(home, 'sessions')
+  const candidates: string[] = []
+  if (cwd) candidates.push(join(root, escapeCwdForStore(cwd), bare, 'session.v4.jsonl.zstd'))
+  try {
+    for (const dir of readdirSync(root)) {
+      const file = join(root, dir, bare, 'session.v4.jsonl.zstd')
+      if (!candidates.includes(file)) candidates.push(file)
+    }
+  } catch {
+    // no sessions dir — nothing to recover
+  }
+  for (const file of candidates) {
+    if (!existsSync(file)) continue
+    const title = firstUserTextFromLog(file)
+    if (title) {
+      logTitleCache.set(bare, title)
+      return title
+    }
+  }
+  logTitleCache.set(bare, undefined)
+  return undefined
 }
 
 /** Name straight out of DSH projections: the title, else the first user message. */
@@ -325,8 +413,8 @@ async function resolveSessionTitleFromHost(
   if (typeof call !== 'function') return undefined
   try {
     const block = await call.call(controller, { sessionId })
-    if (!block) return undefined
-    return projectionTitle({ projections: block })
+    if (!block) return readTitleFromSessionLog(sessionId, cwd)
+    return projectionTitle({ projections: block }) ?? readTitleFromSessionLog(sessionId, cwd)
   } catch {
     return undefined
   }
@@ -340,10 +428,13 @@ async function resolveSessionTitleFromHost(
 export async function resolveSessionTitle(
   ctx: Context,
   sessionId: string,
+  cwd?: string,
 ): Promise<string | undefined> {
   const api = resolveApiProxy(ctx)
   const call = api?.sessions?.projections
-  if (typeof call !== 'function') return await resolveSessionTitleFromHost(ctx, sessionId)
+  if (typeof call !== 'function') {
+    return (await resolveSessionTitleFromHost(ctx, sessionId)) ?? readTitleFromSessionLog(sessionId, cwd)
+  }
   try {
     const raw = await call({ rpcId: randomUUID(), payload: { sessionId } })
     const value = unwrap<ProjectionBlock>(raw)

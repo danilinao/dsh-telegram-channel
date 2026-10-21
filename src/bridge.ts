@@ -13,7 +13,9 @@ import { resolveApiProxy } from './apiproxy.js'
 import {
   catalogFromLiveAgents,
   hostService,
+  isArchived,
   resolveSessionTitle,
+  shortWhen as shortWhenLocal,
   loadCatalog,
   truncateButton,
   visibleSessionsForWorkspace,
@@ -205,6 +207,10 @@ const NEW_WS_CB = 'nw'
 const UNARC_CB = 'unarc:'
 /** Пролистать историю назад: hist:<beforeSeq>. */
 const HIST_CB = 'hist:'
+/** Показать архивные сессии области: arcl:<индекс области>. */
+const ARCLIST_CB = 'arcl:'
+/** Вернуться к списку сессий области: bs */
+const BACK_SESS_CB = 'bs'
 const MAX_BUTTONS = 40
 
 function lastContextKeyboard(): InlineKeyboardMarkup {
@@ -647,6 +653,17 @@ export class TelegramBridge {
       if (restored) await this.sendArchivedPicker(chatId)
       return
     }
+    if (data.startsWith(ARCLIST_CB)) {
+      await this.client.answerCallbackQuery(cq.id)
+      await this.sendArchivedInWorkspace(chatId, Number(data.slice(ARCLIST_CB.length)))
+      return
+    }
+    if (data === BACK_SESS_CB) {
+      const index = picker?.workspaceIndex ?? 0
+      await this.client.answerCallbackQuery(cq.id)
+      await this.sendSessionPicker(chatId, index)
+      return
+    }
     if (data === NEW_WS_CB) {
       await this.client.answerCallbackQuery(cq.id, 'Жду путь к папке')
       this.pendingProject.add(chatId)
@@ -776,7 +793,7 @@ export class TelegramBridge {
     const row = this.lastCatalog?.sessionsById.get(sessionId)
     let name = row?.title
     if (!name || row?.named === false) {
-      const fresh = await resolveSessionTitle(this.ctx, sessionId).catch(() => undefined)
+      const fresh = await resolveSessionTitle(this.ctx, sessionId, row?.cwd).catch(() => undefined)
       if (fresh) {
         name = fresh
         if (row) {
@@ -878,7 +895,8 @@ export class TelegramBridge {
    * ▶ = the session is live in memory, ▷ = parked (resumed on attach).
    */
   private sessionButtonText(row: SessionRow, index: number): string {
-    const name = (row.title ?? '').trim() || `сессия …${row.sessionId.slice(-12)}`
+    const raw = (row.title ?? '').trim() || `сессия …${row.sessionId.slice(-12)}`
+    const name = raw.replace(/…+$/, '').trim() || raw
     return `${index + 1}. ${name} ${row.running ? '▶' : '▷'}`
   }
 
@@ -898,7 +916,7 @@ export class TelegramBridge {
         row.named = true
         return
       }
-      const title = await resolveSessionTitle(this.ctx, row.sessionId)
+      const title = await resolveSessionTitle(this.ctx, row.sessionId, row.cwd)
       if (!title) return
       this.titleCache.set(row.sessionId, { at: row.updatedAt, title })
       row.title = title
@@ -923,12 +941,18 @@ export class TelegramBridge {
     const shown = sessions.slice(0, MAX_BUTTONS)
     await this.ensureSessionNames(shown)
     this.pickers.set(String(chatId), { workspaces, workspaceIndex, sessions: shown, catalog })
+    const archivedCount = workspace.sessionIds
+      .filter((sid) => isArchived(catalog.archivedIds, sid))
+      .length
     const keyboard: InlineKeyboardMarkup = {
       inline_keyboard: [
         ...shown.map((row, i) => ([
           { text: truncateButton(this.sessionButtonText(row, i)), callback_data: `${SID_CB}${i}` },
           { text: '🗄', callback_data: `${ARC_CB}${i}` },
         ])),
+        ...(archivedCount > 0
+          ? [[{ text: `🗂 Архивные (${archivedCount})`, callback_data: `${ARCLIST_CB}${workspaceIndex}` }]]
+          : []),
         [{ text: '➕ Новая сессия здесь', callback_data: `${NEW_SID_CB}${workspaceIndex}` }],
         [{ text: '← К областям', callback_data: BACK_WS_CB }],
       ],
@@ -939,6 +963,7 @@ export class TelegramBridge {
         workspace.path,
         '',
         MSG.NO_SESSIONS_IN_WS_EMPTY(workspace.title),
+        ...(archivedCount > 0 ? ['', `В архиве этой области: ${this.ruCount(archivedCount, 'сессия', 'сессии', 'сессий')}.`] : []),
       ].join('\n')
       await this.client.sendMessage(chatId, body, undefined, keyboard)
       return
@@ -947,16 +972,62 @@ export class TelegramBridge {
       `Рабочая область: ${workspace.title}`,
       workspace.path,
       '',
-      `Выберите сессию (всего ${sessions.length}):`,
-      '',
+      `Выберите сессию: ${this.ruCount(sessions.length, 'сессия', 'сессии', 'сессий')}${archivedCount > 0 ? ` (+${archivedCount} в архиве)` : ''}`,
       ...shown.map((row, i) => {
-        const mark = row.running ? 'идёт работа' : 'не запущена'
-        return `${i + 1}. ${row.title}\n   ${mark} · …${row.sessionId.slice(-12)}`
+        const when = shortWhenLocal(row.updatedAt)
+        const mark = row.running ? '▶ идёт работа' : '▷ не запущена'
+        return `${i + 1}. ${row.title}${when ? ` — ${when}` : ''}\n   ${mark} · …${row.sessionId.slice(-8)}`
       }),
-      sessions.length > MAX_BUTTONS ? `\nПоказаны первые ${MAX_BUTTONS} сессий.` : '',
+      sessions.length > MAX_BUTTONS ? `Показаны первые ${MAX_BUTTONS}.` : '',
       '',
-      'Нажмите кнопку, чтобы привязать; неактивная сессия поднимется автоматически. 🗄 — убрать сессию в архив.',
+      'Кнопка привязывает сессию; 🗄 убирает её в архив.',
     ].filter(Boolean).join('\n')
+    await this.client.sendMessage(chatId, body, undefined, keyboard)
+  }
+
+  /** Archived sessions of one workspace, each with a restore button. */
+  private async sendArchivedInWorkspace(chatId: number, workspaceIndex: number): Promise<void> {
+    const picker = this.pickers.get(String(chatId))
+    const catalog = picker?.catalog ?? await this.resolveCatalog()
+    const workspaces = picker?.workspaces?.length ? picker.workspaces : catalog.workspaces
+    const workspace = workspaces[workspaceIndex]
+    if (!workspace) {
+      await this.client.sendMessage(chatId, MSG.PICKER_STALE)
+      return
+    }
+    const rows: SessionRow[] = []
+    for (const sid of workspace.sessionIds) {
+      if (!isArchived(catalog.archivedIds, sid)) continue
+      const row = catalog.sessionsById.get(sid)
+      if (row) rows.push(row)
+      else rows.push({ sessionId: sid, title: `сессия …${sid.slice(-8)}`, named: false, blank: false, running: false, updatedAt: 0 })
+    }
+    rows.sort((a, b) => b.updatedAt - a.updatedAt)
+    const shown = rows.slice(0, MAX_BUTTONS)
+    await this.ensureSessionNames(shown)
+    this.pickers.set(String(chatId), { workspaces, workspaceIndex, sessions: shown, catalog })
+    const keyboard: InlineKeyboardMarkup = {
+      inline_keyboard: [
+        ...shown.map((row, i) => ([
+          { text: truncateButton(`↩ ${i + 1}. ${row.title}`), callback_data: `${UNARC_CB}${i}` },
+        ])),
+        [{ text: '← К сессиям', callback_data: BACK_SESS_CB }],
+      ],
+    }
+    const body = rows.length === 0
+      ? [`Рабочая область: ${workspace.title}`, '', 'В архиве этой области пусто.'].join('\n')
+      : [
+        `Архив области: ${workspace.title}`,
+        workspace.path,
+        '',
+        `${this.ruCount(rows.length, 'сессия', 'сессии', 'сессий')} в архиве${rows.length > MAX_BUTTONS ? ` (показаны первые ${MAX_BUTTONS})` : ''}:`,
+        ...shown.map((row, i) => {
+          const when = shortWhenLocal(row.updatedAt)
+          return `${i + 1}. ${row.title}${when ? ` — ${when}` : ''}`
+        }),
+        '',
+        'Кнопка возвращает сессию из архива.',
+      ].join('\n')
     await this.client.sendMessage(chatId, body, undefined, keyboard)
   }
 
