@@ -38,7 +38,8 @@ upstream  https://github.com/hi-wenw/dsh-telegram-channel.git
 6. **Уведомления о состоянии.** `turn/end` разбирается по причине: `completed`
    (✅), `error` (текст + подсказка по коду/тексту), `max-tokens`, `blocked`,
    `aborted`, `interrupted`; вопрос агента приходит как «❓ Сессия задала вопрос и
-   ждёт ответа» + название сессии. Канал уведомлений не привязан к привязке: по
+   ждёт ответа» + название сессии и проекта (проект — из реестра областей, иначе
+   basename cwd). Канал уведомлений не привязан к привязке: по
    умолчанию бот следит за всеми сессиями (`/notify every`), `/notify bound`
    сужает до привязанной, `/notify on | errors | off` — набор событий. Состояние
    хранится в `telegram-channel-bindings.json` (`notifyPrefs`, `notifyScope`,

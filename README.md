@@ -44,7 +44,7 @@ Telegram-пульт для **DeepSeek Harness**: телефон подключа
   падение с текстом ошибки и подсказкой (кончились токены/квота, лимит запросов,
   модель недоступна, переполнен контекст, сеть, ключ), достижение лимита выходных
   токенов, аварийный обрыв, и вопрос агента («❓ Сессия задала вопрос и ждёт
-  ответа») — с названием сессии. По умолчанию бот **следит за всеми сессиями**,
+  ответа») — с названием сессии **и проекта**. По умолчанию бот **следит за всеми сессиями**,
   включая запущенные с компьютера; `/notify bound` сужает до привязанной,
   `/notify on | errors | off` задаёт набор событий.
 
@@ -176,7 +176,8 @@ sync/publish workflow.
   a ⚠️ with the error text plus a hint when it fails (quota/tokens exhausted,
   rate limit, model unavailable, context overflow, network, credentials), a
   warning for the output-token ceiling and for crash-orphaned turns, and
-  "❓ the session asked a question and is waiting" — each with the session name.
+  "❓ the session asked a question and is waiting" — each with the session name
+  and its project.
   By default the bot **follows every session**, including turns started on the
   desktop; `/notify bound` narrows it to the attached session, and
   `/notify on | errors | off` picks the event set.

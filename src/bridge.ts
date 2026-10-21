@@ -369,6 +369,8 @@ export class TelegramBridge {
     ].join('\n')).catch((err) => {
       this.ctx.logger.warn(`dsh-telegram-channel: setMyDescription failed: ${this.redact(err)}`)
     })
+    // Names for lifecycle notifications come from the catalog: warm it at boot.
+    this.prefetchCatalog()
     if (!this.polling) {
       this.polling = true
       this.pollAbort = new AbortController()
@@ -719,11 +721,28 @@ export class TelegramBridge {
 
   /** Human name of a session for lifecycle notifications. */
   private sessionLabel(sessionId: string): string {
+    const row = this.lastCatalog?.sessionsById.get(sessionId)
     const bound = [...this.bindings.values()].find((b) => b.sessionId === sessionId)
-    if (bound?.label) return bound.label
-    const fromCatalog = this.lastCatalog?.sessionsById.get(sessionId)?.title
-    if (fromCatalog) return fromCatalog
-    return `…${sessionId.slice(-8)}`
+    const name = row?.title || bound?.label || `…${sessionId.slice(-8)}`
+    const project = this.projectLabel(sessionId, row?.cwd)
+    return project ? `${name} · проект ${project}` : name
+  }
+
+  /** Project (workspace) a session belongs to: registry match, else cwd basename. */
+  private projectLabel(sessionId: string, cwd?: string): string | undefined {
+    const catalog = this.lastCatalog
+    const workspace = catalog?.workspaces.find(
+      (w) => (w.sessionIds ?? []).includes(sessionId) || (cwd !== undefined && w.path === cwd),
+    )
+    if (workspace?.title) return workspace.title
+    return workspaceName(cwd ?? undefined)
+  }
+
+  /** Warm the catalog so notifications can name sessions and projects. */
+  private prefetchCatalog(): void {
+    void this.resolveCatalog().catch((err) => {
+      this.ctx.logger.warn(`dsh-telegram-channel: catalog prefetch failed: ${this.redact(err)}`)
+    })
   }
 
   /**
@@ -1502,6 +1521,7 @@ export class TelegramBridge {
       this.thinkingSessions.delete(id)
       for (const b of targets) this.stopTypingHeartbeat(b.chatId)
       const label = this.sessionLabel(id)
+      if (!this.lastCatalog?.sessionsById.has(id)) this.prefetchCatalog()
       // Abnormal endings (API failure / abort / crash-recovery) must be
       // visible on the phone — previously they ended in silence.
       const reason = event.data?.reason as { kind?: string; error?: { message?: string; code?: string }; reason?: { kind?: string } } | undefined
