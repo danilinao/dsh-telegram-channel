@@ -370,7 +370,12 @@ export class TelegramBridge {
       this.ctx.logger.warn(`dsh-telegram-channel: setMyDescription failed: ${this.redact(err)}`)
     })
     // Names for lifecycle notifications come from the catalog: warm it at boot.
+    // At this instant the host services are not registered yet (the plugin
+    // mounts first), so warm again shortly after — that pass sees the services
+    // and every stored session with its projection.
     this.prefetchCatalog()
+    const reWarm = setTimeout(() => this.prefetchCatalog(), 4000)
+    if (typeof (reWarm as { unref?: () => void }).unref === 'function') (reWarm as { unref: () => void }).unref()
     if (!this.polling) {
       this.polling = true
       this.pollAbort = new AbortController()
@@ -720,6 +725,33 @@ export class TelegramBridge {
   }
 
   /** Human name of a session for lifecycle notifications. */
+  /**
+   * Async label for notifications: when the catalog row has no real title yet
+   * (`named === false`), ask the host for the session projections — that yields
+   * the session title or its first message instead of an id tail. The result is
+   * cached back into the catalog row so later events are cheap.
+   */
+  private async sessionLabelFor(sessionId: string): Promise<string> {
+    const row = this.lastCatalog?.sessionsById.get(sessionId)
+    let name = row?.title
+    if (!name || row?.named === false) {
+      const fresh = await resolveSessionTitle(this.ctx, sessionId).catch(() => undefined)
+      if (fresh) {
+        name = fresh
+        if (row) {
+          row.title = fresh
+          row.named = true
+        }
+      }
+    }
+    if (!name) {
+      const bound = [...this.bindings.values()].find((b) => b.sessionId === sessionId)
+      name = bound?.label ?? `…${sessionId.slice(-8)}`
+    }
+    const project = this.projectLabel(sessionId, row?.cwd)
+    return project ? `${name} · проект ${project}` : name
+  }
+
   private sessionLabel(sessionId: string): string {
     const row = this.lastCatalog?.sessionsById.get(sessionId)
     const bound = [...this.bindings.values()].find((b) => b.sessionId === sessionId)
@@ -1520,8 +1552,8 @@ export class TelegramBridge {
       this.busySessions.delete(id)
       this.thinkingSessions.delete(id)
       for (const b of targets) this.stopTypingHeartbeat(b.chatId)
-      const label = this.sessionLabel(id)
       if (!this.lastCatalog?.sessionsById.has(id)) this.prefetchCatalog()
+      const label = await this.sessionLabelFor(id)
       // Abnormal endings (API failure / abort / crash-recovery) must be
       // visible on the phone — previously they ended in silence.
       const reason = event.data?.reason as { kind?: string; error?: { message?: string; code?: string }; reason?: { kind?: string } } | undefined
