@@ -333,6 +333,21 @@ export class TelegramBridge {
     }).catch((err) => {
       this.ctx.logger.warn(`dsh-telegram-channel: setMyCommands failed: ${this.redact(err)}`)
     })
+    // Bot profile card (what a stranger sees before /start) — empty by default.
+    void this.client.setMyShortDescription(
+      'Telegram-пульт для DeepSeek Harness: та же сессия, что на компьютере',
+    ).catch((err) => {
+      this.ctx.logger.warn(`dsh-telegram-channel: setMyShortDescription failed: ${this.redact(err)}`)
+    })
+    void this.client.setMyDescription([
+      'Пульт для DeepSeek Harness: телефон подключается к уже идущей сессии на компьютере.',
+      'Один диалог, две стороны — Web и Telegram видят одну и ту же переписку.',
+      '',
+      'Нажмите /sessions, выберите рабочую область и сессию — дальше просто пишите.',
+      'Доступ только для пользователей из белого списка.',
+    ].join('\n')).catch((err) => {
+      this.ctx.logger.warn(`dsh-telegram-channel: setMyDescription failed: ${this.redact(err)}`)
+    })
     if (!this.polling) {
       this.polling = true
       this.pollAbort = new AbortController()

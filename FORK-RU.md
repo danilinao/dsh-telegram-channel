@@ -13,6 +13,17 @@ git remote -v          # upstream → github:hi-wenw/dsh-telegram-channel
 git log --oneline      # верхний коммит — русская локализация
 ```
 
+## Публикация
+
+Форк опубликован: **https://github.com/danilinao/dsh-telegram-channel**
+(`main`, тег `ru-0.3.5`; `upstream` — оригинал). Пуш — через `./PUBLISH.sh`:
+токен читается из `~/.dsh/.credentials.yaml` (`refs.GITHUB_TOKEN`) и уходит в
+git через `GIT_ASKPASS`, поэтому не попадает ни в `.git/config`, ни в историю.
+
+Нужны права `Contents: write` на этот репозиторий; описание и темы
+репозитория через API не ставятся — для них fine-grained токену нужно ещё
+`Administration: write` (или правка вручную в веб-интерфейсе).
+
 ## Что изменено относительно upstream
 
 1. **Русский интерфейс.** Переведены все пользовательские строки: `/start`,

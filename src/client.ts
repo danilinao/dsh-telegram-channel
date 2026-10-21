@@ -102,6 +102,10 @@ export interface TelegramClientLike {
   sendChatAction(chatId: number, action: string): Promise<boolean>
   answerCallbackQuery(callbackQueryId: string, text?: string): Promise<boolean>
   setMyCommands(commands: TelegramBotCommand[]): Promise<boolean>
+  /** Russian profile text shown on the bot's card before the first message. */
+  setMyDescription(description: string): Promise<boolean>
+  /** One-line blurb used in bot lists and shares. */
+  setMyShortDescription(shortDescription: string): Promise<boolean>
   /** Resolve a file_id to a file_path (downloadable URL suffix). */
   getFile(fileId: string): Promise<TelegramFile>
   /** Download file bytes from the Bot API file endpoint (GET, proxy-aware). */
@@ -229,6 +233,14 @@ export class TelegramClient implements TelegramClientLike {
 
   async setMyCommands(commands: TelegramBotCommand[]): Promise<boolean> {
     return this.call<boolean>('setMyCommands', { commands })
+  }
+
+  async setMyDescription(description: string): Promise<boolean> {
+    return this.call<boolean>('setMyDescription', { description })
+  }
+
+  async setMyShortDescription(shortDescription: string): Promise<boolean> {
+    return this.call<boolean>('setMyShortDescription', { short_description: shortDescription })
   }
 
   async getFile(fileId: string): Promise<TelegramFile> {
