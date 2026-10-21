@@ -1,7 +1,7 @@
 {
   "name": "dsh-telegram-channel",
-  "version": "0.3.5",
-  "description": "DeepSeek Harness Telegram mobile remote: workspace→session, /last context, /model — dsh-plugin",
+  "version": "0.4.0",
+  "description": "Telegram-пульт для DeepSeek Harness: живая Web-сессия на телефоне — русский интерфейс, архивные сессии скрыты, имя сессии на кнопке",
   "keywords": [
     "telegram",
     "bot",
@@ -21,16 +21,19 @@
     "dsh-plugin",
     "cordis",
     "agent",
-    "live-session"
+    "live-session",
+    "russian",
+    "localization",
+    "ru"
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/hi-wenw/dsh-telegram-channel.git"
+    "url": "git+https://github.com/danilinao/dsh-telegram-channel.git"
   },
   "bugs": {
     "url": "https://github.com/hi-wenw/dsh-telegram-channel/issues"
   },
-  "homepage": "https://github.com/hi-wenw/dsh-telegram-channel#readme",
+  "homepage": "https://github.com/danilinao/dsh-telegram-channel#readme",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
@@ -46,6 +49,7 @@
     "scripts",
     "cordis.patch.yml",
     "README.md",
+    "UPSTREAM.md",
     "LICENSE"
   ],
   "license": "MIT",
@@ -82,5 +86,12 @@
   },
   "dependencies": {
     "undici": "^7.29.0"
-  }
+  },
+  "author": "Alexey Danilin",
+  "contributors": [
+    {
+      "name": "hi-wenw/dsh-telegram-channel contributors",
+      "url": "https://github.com/hi-wenw/dsh-telegram-channel"
+    }
+  ]
 }
