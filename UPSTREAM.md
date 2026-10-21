@@ -104,10 +104,3 @@ git rebase upstream/master                     # перенести наши к�
 git через `GIT_ASKPASS` — в `.git/config`, в истории shell и в репозитории его нет.
 Нужны права `Contents: write`; для правки описания и тем репозитория через API
 нужно ещё `Administration: write` (иначе — вручную в веб-интерфейсе).
-
-## Требование к сети
-
-`api.telegram.org` доступен не везде: в РФ он режется по IP. Маршрут до Telegram
-DC (`149.154.160.0/20`, `91.108.4.0/22`) заводится в тоннель (в этом хозяйстве —
-AmneziaWG: `sudo tunnel-route add 149.154.160.0/20`, записи в
-`/etc/tunnel-route/extras.txt`). Без маршрута long-poll молча таймаутит.
