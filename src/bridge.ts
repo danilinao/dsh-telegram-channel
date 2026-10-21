@@ -29,7 +29,7 @@ import {
   type TelegramUpdate,
 } from './client.js'
 import { MSG, LAST_CB, parseCommand } from './commands.js'
-import { markdownToHtml, splitMessage } from './format.js'
+import { escapeHtml, markdownToHtml, splitMessage } from './format.js'
 import { splitRichMarkdown } from './rich-format.js'
 import { formatLastTurn, loadLastTurn } from './history.js'
 import { describeAgent, displayLabel, workspaceName } from './label.js'
@@ -201,6 +201,10 @@ const ARC_CB = 'arc:'
 const NEW_SID_CB = 'ns:'
 /** «Новый проект»: плагин ждёт путь следующим сообщением. */
 const NEW_WS_CB = 'nw'
+/** Вернуть сессию из архива: unarc:<индекс в списке архива>. */
+const UNARC_CB = 'unarc:'
+/** Пролистать историю назад: hist:<beforeSeq>. */
+const HIST_CB = 'hist:'
 const MAX_BUTTONS = 40
 
 function lastContextKeyboard(): InlineKeyboardMarkup {
@@ -259,6 +263,10 @@ export class TelegramBridge {
   private readonly knownChats = new Set<number>()
   /** Последний загруженный каталог — источник имён сессий для уведомлений. */
   private lastCatalog?: CatalogSnapshot
+  /** sessionId → накопленные рассуждения текущего шага (уходят спойлером). */
+  private readonly reasoningBuffers = new Map<string, string>()
+  /** chatId → курсор для листания истории (beforeSeq) и признак «есть ещё». */
+  private readonly historyCursors = new Map<string, { sessionId: string; beforeSeq?: number }>()
   /** chatId → model awaiting reasoning-effort pick (kept outside picker so list refreshes won't drop it). */
   private readonly pendingModels = new Map<string, ModelOption>()
   private polling = false
@@ -346,6 +354,8 @@ export class TelegramBridge {
       { command: 'new', description: 'Новый диалог в этой области и привязка' },
       { command: 'newproject', description: 'Добавить папку как проект' },
       { command: 'archive', description: 'Убрать сессию в архив' },
+      { command: 'archived', description: 'Список архива — вернуть сессию' },
+      { command: 'history', description: 'Предыдущие сообщения сессии' },
       { command: 'notify', description: 'Уведомления: on/errors/off, every/bound' },
       { command: 'cancel', description: 'Закрыть ответы/подтверждения в TG' },
       { command: 'help', description: 'Помощь' },
@@ -525,6 +535,12 @@ export class TelegramBridge {
       case 'projects':
         await this.sendWorkspacePicker(chatId)
         return
+      case 'archived':
+        await this.sendArchivedPicker(chatId)
+        return
+      case 'history':
+        await this.handleHistoryCommand(chatId, parsed.arg)
+        return
       case 'cancel': {
         // /cancel closes the TG-side answer/approval channel; the UI side stays open.
         let cancelled = false
@@ -604,6 +620,31 @@ export class TelegramBridge {
         return
       }
       await this.bindSession(chatId, cq.id, row)
+      return
+    }
+    if (data.startsWith(HIST_CB)) {
+      const beforeSeq = Number(data.slice(HIST_CB.length))
+      const cursor = this.historyCursors.get(String(chatId))
+      const sessionId = cursor?.sessionId ?? this.bindings.get(String(chatId))?.sessionId
+      await this.client.answerCallbackQuery(cq.id)
+      if (!sessionId) {
+        await this.client.sendMessage(chatId, MSG.NEED_BIND)
+        return
+      }
+      await this.sendHistoryPage(chatId, sessionId, Number.isFinite(beforeSeq) ? beforeSeq : undefined)
+      return
+    }
+    if (data.startsWith(UNARC_CB)) {
+      const index = Number(data.slice(UNARC_CB.length))
+      const row = picker?.sessions[index]
+      if (!row) {
+        await this.client.answerCallbackQuery(cq.id, 'Список устарел')
+        await this.client.sendMessage(chatId, MSG.PICKER_STALE)
+        return
+      }
+      await this.client.answerCallbackQuery(cq.id, 'Возвращаю')
+      const restored = await this.unarchiveSessionById(chatId, row.sessionId, row.title)
+      if (restored) await this.sendArchivedPicker(chatId)
       return
     }
     if (data === NEW_WS_CB) {
@@ -937,6 +978,8 @@ export class TelegramBridge {
     this.saveBindings()
     await this.client.answerCallbackQuery(callbackId, 'Привязано')
     await this.client.sendMessage(chatId, MSG.BOUND(label), undefined, lastContextKeyboard())
+    // Show where we left off: the last page of the conversation.
+    await this.sendHistoryPage(chatId, String(agent.id))
   }
 
   private async sendLastTurn(chatId: number): Promise<void> {
@@ -1549,6 +1592,7 @@ export class TelegramBridge {
     }
 
     if (event.type === 'turn/end') {
+      await this.flushReasoning(id)
       this.busySessions.delete(id)
       this.thinkingSessions.delete(id)
       for (const b of targets) this.stopTypingHeartbeat(b.chatId)
@@ -1580,6 +1624,11 @@ export class TelegramBridge {
       return
     }
 
+    if (event.type === 'step/end') {
+      await this.flushReasoning(id)
+      return
+    }
+
     if (event.type === 'tool/call') {
       // Progress summary; ask_user is owned by the provider hook (avoids duplicates).
       const name = event.data?.name ?? 'tool'
@@ -1592,11 +1641,15 @@ export class TelegramBridge {
         }
         this.callNames.set(String(event.data.callId), String(name))
       }
-      const args = typeof event.data?.arguments === 'string' ? event.data.arguments : ''
-      const brief = args.replace(/\s+/g, ' ').trim()
-      const shown = brief.length > 60 ? `${brief.slice(0, 60)}…` : brief
-      for (const b of targets)
-        this.enqueueNotice(b.chatId, `> ${name}${shown ? ` ${shown}` : ''}`)
+      const rawArgs = typeof event.data?.arguments === 'string'
+        ? event.data.arguments
+        : JSON.stringify(event.data?.arguments ?? {}, null, 2)
+      for (const b of targets) {
+        await this.sendHtml(
+          b.chatId,
+          this.spoilerBlock(`🛠 ${escapeHtml(String(name))}`, rawArgs?.trim() ? rawArgs : '(без аргументов)'),
+        )
+      }
       return
     }
 
@@ -1614,10 +1667,16 @@ export class TelegramBridge {
       const ctype = String(chunk?.type ?? '')
       const btype = String(chunk?.block?.type ?? '')
       const isReasoning = ctype.includes('reasoning') || btype.includes('reasoning') || btype.includes('think')
-      if (isReasoning && this.thinkingSessions.get(id) !== true) {
-        this.thinkingSessions.set(id, true)
-        for (const b of targets)
-          this.enqueueNotice(b.chatId, '> Thinking…')
+      if (isReasoning) {
+        const delta = (chunk as { text?: unknown } | undefined)?.text
+        if (typeof delta === 'string' && delta.length > 0) {
+          this.reasoningBuffers.set(id, (this.reasoningBuffers.get(id) ?? '') + delta)
+        }
+        if (this.thinkingSessions.get(id) !== true) {
+          this.thinkingSessions.set(id, true)
+          for (const b of targets)
+            this.enqueueNotice(b.chatId, '> Думаю…')
+        }
       }
       return
     }
@@ -2092,6 +2151,17 @@ export class TelegramBridge {
     await this.client.sendMessage(chatId, lines.join('\n'))
   }
 
+  /** /history [beforeSeq]: показать предыдущие сообщения сессии. */
+  private async handleHistoryCommand(chatId: number, arg?: string): Promise<void> {
+    const binding = this.bindings.get(String(chatId))
+    if (!binding) {
+      await this.client.sendMessage(chatId, MSG.NEED_BIND)
+      return
+    }
+    const raw = Number((arg ?? '').trim())
+    await this.sendHistoryPage(chatId, binding.sessionId, Number.isFinite(raw) && raw > 0 ? raw : undefined)
+  }
+
   /** /new: create a session in the bound session's workspace and attach to it. */
   private async newSessionHere(chatId: number): Promise<void> {
     const binding = this.bindings.get(String(chatId))
@@ -2327,6 +2397,204 @@ export class TelegramBridge {
     const tail = [code ? `Код: ${code}` : '', hint ? `Похоже: ${hint}` : ''].filter(Boolean).join(' · ')
     const head = raw || code || 'причина не сообщена'
     return `⚠️ Сессия упала: ${head}${tail ? `\n${tail}` : ''}`
+  }
+
+  /** «1 сессия / 2 сессии / 5 сессий» */
+  private ruCount(n: number, one: string, few: string, many: string): string {
+    const mod10 = n % 10
+    const mod100 = n % 100
+    const word = mod10 === 1 && mod100 !== 11
+      ? one
+      : mod10 >= 2 && mod10 <= 4 && (mod100 < 10 || mod100 >= 20)
+        ? few
+        : many
+    return `${n} ${word}`
+  }
+
+  // ── вывод: HTML, спойлеры, архив, история ──
+
+  /** Send pre-built HTML; if Telegram rejects the markup, fall back to plain. */
+  private async sendHtml(chatId: number, html: string, keyboard?: InlineKeyboardMarkup): Promise<void> {
+    try {
+      await this.withRetry(() => this.client.sendMessage(chatId, html, 'HTML', keyboard))
+    } catch (err) {
+      this.ctx.logger.warn(`dsh-telegram-channel: HTML send failed, falling back: ${this.redact(err)}`)
+      await this.client.sendMessage(chatId, html.replace(/<[^>]+>/g, ''), undefined, keyboard)
+    }
+  }
+
+  /** Collapsible block: Telegram shows it as "expandable quote", hidden by default. */
+  private spoilerBlock(title: string, body: string, limit = 3000): string {
+    const text = body.length > limit ? `${body.slice(0, limit)}\n… (обрезано)` : body
+    return `<blockquote expandable>${title}\n<pre>${escapeHtml(text)}</pre></blockquote>`
+  }
+
+  /** Flush accumulated reasoning of one session as a spoiler block. */
+  private async flushReasoning(sessionId: string): Promise<void> {
+    const buffered = this.reasoningBuffers.get(sessionId)
+    this.reasoningBuffers.delete(sessionId)
+    if (!buffered || buffered.trim().length === 0) return
+    const targets = [...this.bindings.values()].filter((b) => b.sessionId === sessionId)
+    for (const b of targets) {
+      await this.sendHtml(b.chatId, this.spoilerBlock('🧠 Рассуждения', buffered.trim()))
+    }
+  }
+
+  /** List archived sessions with one-tap restore. */
+  private async sendArchivedPicker(chatId: number): Promise<void> {
+    const catalog = await this.resolveCatalog()
+    const rows: SessionRow[] = []
+    for (const rawId of catalog.archivedIds) {
+      const row = catalog.sessionsById.get(rawId)
+      if (row) rows.push(row)
+      else rows.push({
+        sessionId: rawId,
+        title: `сессия …${String(rawId).slice(-8)}`,
+        named: false,
+        blank: false,
+        running: false,
+        updatedAt: 0,
+      })
+    }
+    rows.sort((a, b) => b.updatedAt - a.updatedAt)
+    if (rows.length === 0) {
+      await this.client.sendMessage(chatId, 'Архив пуст.')
+      return
+    }
+    const shown = rows.slice(0, MAX_BUTTONS)
+    this.pickers.set(String(chatId), { workspaces: [], sessions: shown, catalog })
+    const keyboard: InlineKeyboardMarkup = {
+      inline_keyboard: shown.map((row, i) => ([{
+        text: truncateButton(`↩ ${i + 1}. ${row.title}`),
+        callback_data: `${UNARC_CB}${i}`,
+      }])),
+    }
+    const body = [
+      `Архив: ${this.ruCount(rows.length, 'сессия', 'сессии', 'сессий')}${rows.length > MAX_BUTTONS ? ` (показаны первые ${MAX_BUTTONS})` : ''}.`,
+      '',
+      ...shown.map((row, i) => {
+        const project = this.projectLabel(row.sessionId, row.cwd)
+        return `${i + 1}. ${row.title}${project ? ` · проект ${project}` : ''}`
+      }),
+      '',
+      'Нажмите кнопку, чтобы вернуть сессию из архива.',
+    ].join('\n')
+    await this.client.sendMessage(chatId, body, undefined, keyboard)
+  }
+
+  /** Restore one session from the archive (host registry, DSH 0.2). */
+  private async unarchiveSessionById(chatId: number, sessionId: string, label?: string): Promise<boolean> {
+    const registry = hostService<{
+      unarchiveSession?: (id: string) => Promise<void>
+    }>(this.ctx, 'workspaceRegistry')
+    const call = registry?.unarchiveSession
+    if (typeof call !== 'function') {
+      await this.client.sendMessage(chatId, 'Хост не умеет возвращать сессии из архива (нет workspaceRegistry).')
+      return false
+    }
+    try {
+      await call.call(registry, sessionId)
+    } catch (err) {
+      await this.client.sendMessage(chatId, `Не удалось вернуть из архива: ${this.redact(err)}`)
+      return false
+    }
+    this.lastCatalog = undefined
+    await this.client.sendMessage(chatId, `↩ Сессия возвращена из архива: ${label ?? `…${sessionId.slice(-8)}`}`)
+    return true
+  }
+
+  /**
+   * One page of real session history (user/assistant messages and tool calls as
+   * spoilers) via the host session controller, newest page by default.
+   */
+  private async fetchHistoryPage(
+    sessionId: string,
+    beforeSeq?: number,
+    maxMessages = 10,
+  ): Promise<{ blocks: string[]; earliestSeq?: number; hasMore: boolean } | undefined> {
+    const controller = hostService<{
+      page?: (
+        request: {
+          address: { kind: 'session'; sessionId: string }
+          throughSeq: number
+          maxMessages?: number
+          beforeSeq?: number
+        },
+      ) => Promise<{
+        records?: Array<{ event?: { type?: string; seq?: number; data?: Record<string, unknown> } }>
+        hasMore?: boolean
+      }>
+    }>(this.ctx, 'sessionController')
+    const page = controller?.page
+    if (typeof page !== 'function') return undefined
+    try {
+      const res = await page.call(controller, {
+        address: { kind: 'session', sessionId },
+        throughSeq: -1,
+        maxMessages,
+        ...(beforeSeq !== undefined ? { beforeSeq } : {}),
+      })
+      const records = res?.records ?? []
+      const blocks: string[] = []
+      let earliest: number | undefined
+      for (const record of records) {
+        const event = record?.event
+        if (!event?.type) continue
+        if (typeof event.seq === 'number' && (earliest === undefined || event.seq < earliest)) earliest = event.seq
+        const data = (event.data ?? {}) as {
+          message?: { content?: unknown }
+          source?: { kind?: string }
+          name?: string
+          arguments?: unknown
+        }
+        if (event.type === 'user/message') {
+          if (data.source?.kind !== undefined && data.source.kind !== 'user') continue
+          const text = contentToText(data.message?.content)
+          if (text.trim()) blocks.push(`👤 <b>Вы</b>\n${escapeHtml(text)}`)
+        } else if (event.type === 'assistant/message') {
+          const text = contentToText(data.message?.content)
+          if (text.trim()) blocks.push(`🤖 <b>Ассистент</b>\n${escapeHtml(text)}`)
+        } else if (event.type === 'tool/call') {
+          const args = typeof data.arguments === 'string' ? data.arguments : JSON.stringify(data.arguments ?? {})
+          blocks.push(this.spoilerBlock(`🛠 ${escapeHtml(String(data.name ?? 'tool'))}`, args))
+        }
+      }
+      return { blocks, earliestSeq: earliest, hasMore: Boolean(res?.hasMore) }
+    } catch (err) {
+      this.ctx.logger.warn(`dsh-telegram-channel: history page failed: ${this.redact(err)}`)
+      return undefined
+    }
+  }
+
+  /** Send a history page to the chat, with a "earlier" button when available. */
+  private async sendHistoryPage(chatId: number, sessionId: string, beforeSeq?: number): Promise<void> {
+    const page = await this.fetchHistoryPage(sessionId, beforeSeq)
+    if (!page) {
+      await this.client.sendMessage(chatId, 'История недоступна: хост не отдал страницу сессии.')
+      return
+    }
+    if (page.blocks.length === 0) {
+      await this.client.sendMessage(chatId, beforeSeq === undefined ? 'Сообщений в сессии пока нет.' : 'Раньше сообщений нет.')
+      return
+    }
+    // Group events into messages below the Telegram limit.
+    let buffer = ''
+    const flush = async (): Promise<void> => {
+      if (!buffer.trim()) return
+      await this.sendHtml(chatId, buffer)
+      buffer = ''
+    }
+    for (const block of page.blocks) {
+      if (buffer.length + block.length > 3500) await flush()
+      buffer = buffer ? `${buffer}\n\n${block}` : block
+    }
+    await flush()
+    this.historyCursors.set(String(chatId), { sessionId, beforeSeq: page.earliestSeq })
+    if (page.hasMore && page.earliestSeq !== undefined) {
+      await this.client.sendMessage(chatId, 'Показаны последние сообщения. Ранее:', undefined, {
+        inline_keyboard: [[{ text: '⬅ Раньше', callback_data: `${HIST_CB}${page.earliestSeq}` }]],
+      })
+    }
   }
 
   private bindingsPath(): string {

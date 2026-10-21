@@ -40,6 +40,16 @@ Telegram-пульт для **DeepSeek Harness**: телефон подключа
   кнопка «➕ Новый проект») добавляет в реестр новую папку, `/new` создаёт диалог в
   текущей области, 🗄 у сессии или `/archive` убирают её в архив (работа
   останавливается, из меню и Web сессия исчезает).
+- **Команды и рассуждения — целиком, но под спойлером.** Вызовы инструментов
+  приходят с полными аргументами, а текст рассуждений — отдельным блоком; и то и
+  другое свёрнуто в «раскрывающуюся цитату» Telegram (`<blockquote expandable>`),
+  разворачивается одним тапом.
+- **История при открытии сессии.** При привязке сразу показываются последние
+  сообщения диалога; кнопка «⬅ Раньше» листает глубже, `/history [seq]` — тоже
+  вручную. В истории видны реплики пользователя, ответы ассистента и вызовы
+  инструментов (спойлером).
+- **Возврат из архива.** `/archived` показывает архивные сессии с кнопкой «↩» —
+  сессия возвращается в список и снова доступна в Web.
 - **Уведомления о состоянии сессии.** В чат приходит: успешное завершение хода,
   падение с текстом ошибки и подсказкой (кончились токены/квота, лимит запросов,
   модель недоступна, переполнен контекст, сеть, ключ), достижение лимита выходных
@@ -90,6 +100,8 @@ systemctl restart dsh           # плагин монтируется при с�
 | `/new` | новый диалог в текущей области и привязка |
 | `/newproject <путь> [\| Название]` | добавить папку как проект (рабочую область) |
 | `/archive` | убрать привязанную сессию в архив |
+| `/archived` | список архива, кнопка «↩» возвращает сессию |
+| `/history [seq]` | предыдущие сообщения сессии (листается «⬅ Раньше») |
 | `/notify on\|errors\|off` | какие события присылать (всё / только ошибки / ничего) |
 | `/notify every\|bound` | за какими сессиями следить (всеми / только привязанной) |
 | `/projects` | список проектов и сессий (то же, что `/sessions`) |
@@ -172,6 +184,16 @@ sync/publish workflow.
   the current workspace, and 🗄 next to a session (or `/archive`) moves it to the
   archive — the session is stopped and disappears from both the menu and the web
   UI.
+- **Commands and reasoning, in full but collapsed.** Tool calls arrive with
+  their complete arguments and the model's reasoning as its own block; both are
+  wrapped in a Telegram expandable quote (`<blockquote expandable>`), so they stay
+  out of the way until tapped.
+- **Conversation history on attach.** Binding a session immediately shows the last
+  messages; the "⬅ Earlier" button pages further back, and `/history [seq]` does
+  it manually. User prompts, assistant replies and tool calls (as spoilers) are
+  all included.
+- **Restore from the archive.** `/archived` lists archived sessions with a "↩"
+  button that puts the session back into the registry.
 - **Session state notifications.** The chat receives a ✅ when a turn completes,
   a ⚠️ with the error text plus a hint when it fails (quota/tokens exhausted,
   rate limit, model unavailable, context overflow, network, credentials), a
@@ -252,6 +274,8 @@ the row back to its loader entry and the settings form becomes read-only.
 | `/new` | create a new session in the current workspace and attach to it |
 | `/newproject <path> [\| Title]` | register a folder as a project (workspace) |
 | `/archive` | move the attached session to the archive |
+| `/archived` | archived sessions, "↩" restores one |
+| `/history [seq]` | earlier messages of the session ("⬅ Earlier" pages back) |
 | `/notify on\|errors\|off` | which events this chat receives (all / errors only / none) |
 | `/notify every\|bound` | which sessions to follow (all / attached only) |
 | `/projects` | project/session list (alias of `/sessions`) |

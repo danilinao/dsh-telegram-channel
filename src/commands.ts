@@ -14,6 +14,8 @@ export const MSG = {
     '/rich — режим рендера: on=rich (нужен свежий клиент) / off=HTML (по умолчанию); запоминается для этого чата',
     '/newproject <путь> [ | Название] — добавить папку как проект (рабочую область)',
     '/archive — убрать привязанную сессию в архив (работа останавливается)',
+    '/archived — список архива с кнопкой «вернуть»',
+    '/history [seq] — предыдущие сообщения сессии (листается кнопкой «⬅ Раньше»)',
     '/notify on|errors|off — какие события присылать; /notify every|bound — за всеми сессиями или только за привязанной',
     '/projects — список проектов и сессий (то же, что /sessions)',
     '/unbind — отвязать телефон (сессия на компьютере продолжает работать)',
@@ -158,6 +160,8 @@ export type ParsedCommand =
   | { type: 'notify'; text: string; arg?: string }
   | { type: 'newproject'; text: string; arg?: string }
   | { type: 'projects'; text: string }
+  | { type: 'archived'; text: string }
+  | { type: 'history'; text: string; arg?: string }
   | { type: 'unknown'; command: string; text: string }
   | { type: 'plain'; text: string }
 
@@ -214,6 +218,12 @@ export function parseCommand(text: string): ParsedCommand {
     case '/projects':
     case '/workspaces':
       return { type: 'projects', text }
+    case '/archived':
+    case '/archive-list':
+      return { type: 'archived', text }
+    case '/history':
+    case '/log':
+      return { type: 'history', text, arg: text.split(/\s+/)[1] }
     default:
       return { type: 'unknown', command, text }
   }

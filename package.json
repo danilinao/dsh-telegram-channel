@@ -1,6 +1,6 @@
 {
   "name": "dsh-telegram-channel",
-  "version": "0.6.2",
+  "version": "0.7.0",
   "description": "Telegram-пульт для DeepSeek Harness: живая Web-сессия на телефоне — русский интерфейс, архивные сессии скрыты, имя сессии на кнопке",
   "keywords": [
     "telegram",
