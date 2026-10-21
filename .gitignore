@@ -1,3 +1,13 @@
-﻿node_modules/
+# Зависимости
+node_modules/
+
+# Артефакты упаковки и локальные черновики (lib/ наоборот коммитится: DSH грузит его)
+*.tgz
+coverage/
+.tmp/
+
+# Логи и мусор ОС
 *.log
+npm-debug.log*
 .DS_Store
+Thumbs.db

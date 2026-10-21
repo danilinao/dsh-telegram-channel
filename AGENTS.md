@@ -1,8 +1,8 @@
 # tg-bot-dsh — правила работы агента
 
-Telegram-пульт для DeepSeek Harness: плагин `dsh-telegram-channel` (русское
-ответвление `hi-wenw/dsh-telegram-channel`). Плагин живёт **внутри процесса
-`dsh web`** и грузится как `link:`-зависимость профиля `web` из этой папки.
+Telegram-пульт для DeepSeek Harness: плагин `dsh-telegram-channel` (ответвление
+`hi-wenw/dsh-telegram-channel`). Плагин живёт **внутри процесса `dsh web`** и
+подключён к профилю `web` как `link:`-зависимость из этой папки.
 
 ## Сначала — память
 
@@ -11,41 +11,51 @@ Telegram-пульт для DeepSeek Harness: плагин `dsh-telegram-channel`
 2. `state.md` — где мы сейчас;
 3. `NOW.md` — последние компакты (пишется автоматически).
 
-## Жёсткие правила
+## Код и сборка
 
-- **DSH исполняет `lib/`, а не `src/`.** Правка в `src/*.ts` без такой же
-  правки в `lib/*.js` до бота не доедет. Дублировать вручную, затем
-  `for f in lib/*.js; do node --check "$f"; done`.
-- **В `lib/` не должно оставаться китайских литералов** (наследие upstream).
-  Русские строки — в `src/commands.ts`, дублируются в `lib/commands.js`.
-- **Плагин монтируется только при старте `dsh`.** Рестарт — через
-  `/home/alexey/dsh-tg-reload.sh` (root), поставленный таймером, чтобы не
-  оборвать текущий ход:
-  `sudo systemd-run --on-active=45 --unit=dsh-tg-reload-$(date +%H%M%S) /home/alexey/dsh-tg-reload.sh`.
-  Скрипт сам откатывает плагин из профиля, если Web не поднялся за ~2 минуты;
-  лог — `/var/log/dsh-tg-reload.log`. Итог: `OK - telegram channel plugin mounted, no rollback`.
-- **Секреты** (токен бота, `GITHUB_TOKEN`) живут только в
-  `~/.dsh/profiles/web/cordis.patch.yml` и `~/.dsh/.credentials.yaml`.
-  В репозиторий, README и память их не писать.
-- **Версия пакета:** DSH сверяет точную версию, поэтому после смены `version`
-  в `package.json` нужно исключение:
-  `dsh plugin --profile web allow-version dsh-telegram-channel@<версия> --dsh-version 0.2.1-alpha.2 --accept-risk`.
-  Накопленные исключения — `~/.dsh/profiles/web/compatibility.json`.
-- **Конфиг-строка в профиле — id-оверрайд** (`- id: dsh-telegram-channel`),
-  не `insert`: иначе `duplicate loader entry id`.
+- **`src/` — источник истины, `lib/` — результат сборки.** DSH исполняет
+  `lib/index.js`, поэтому после правки `src/` обязательно `npm run build` (или
+  `npm run check` целиком). `lib/` коммитится — клон без сборки тоже работает.
+- `npm test` — 62 теста по `src/`; `npm run test:lib` проверяет, что `lib/`
+  собран из текущего `src/`; `npm run check` = typecheck → build → тесты.
+- В `lib/` не должно быть китайских литералов (наследие upstream): они ловятся
+  `test:lib`, но лучше сразу переводить строки в `src/commands.ts`.
+- Подробно — [BUILD.md](BUILD.md).
 
-## Проверки
+## Работа с живым DSH
 
-```bash
-node --test tests/                          # сейчас 22/28 (см. MEMORY.md, почему 6 падают)
-for f in lib/*.js; do node --check "$f"; done
-```
+- **Плагин монтируется только при старте `dsh`.** Правки в `lib/` без рестарта
+  не видны.
+- **Рестарт `dsh` — только по разрешению владельца.** Он просил спрашивать.
+  Безопасный способ: `sudo systemd-run --on-active=45
+  --unit=dsh-tg-reload-$(date +%H%M%S) /home/alexey/dsh-tg-reload.sh` — таймер
+  срабатывает после доставки сообщения, скрипт откатывает плагин из профиля,
+  если Web не поднялся. Лог: `/var/log/dsh-tg-reload.log`, успех —
+  `OK - telegram channel plugin mounted, no rollback`.
+- Версия в `package.json` участвует в проверке совместимости: peer-диапазоны
+  `@deepseek-ai/dsh*` рассчитаны на рантайм хоста. Если хост обновится до
+  несовместимой версии — либо правим диапазоны, либо выдаём исключение
+  `dsh plugin --profile web allow-version ... --accept-risk`.
 
-Смоук в Telegram: `/status`, `/sessions`, сообщение в привязанную сессию.
+## Релизы и публикация
 
-## Публикация
+- **Пуш и релизы делает агент сам**, без отдельного запроса.
+- **Релиз — только на крупное изменение** (новая возможность, смена модели
+  работы, крупный рефакторинг). Мелкие правки — обычные коммиты в `main`.
+- Порядок: `npm run check` → `npm version <major|minor|patch>
+  --no-git-tag-version` → запись в `CHANGELOG.md` → коммит → `git tag vX.Y.Z` →
+  `git push origin main --tags` (или `./PUBLISH.sh`, он берёт токен из хранилища
+  DSH) → GitHub Release с описанием из `CHANGELOG.md`.
+- npm-публикация пока не настроена: на хосте нет npm-токена (`npm whoami` →
+  `ENEEDAUTH`). Пакет к ней готов (`npm pack`, `prepublishOnly`).
 
-```bash
-./PUBLISH.sh            # push main + теги, токен через GIT_ASKPASS
-./PUBLISH.sh --dry-run
-```
+## Секреты
+
+Токен бота и `GITHUB_TOKEN` живут только в
+`~/.dsh/profiles/web/cordis.patch.yml` и `~/.dsh/.credentials.yaml`.
+В репозиторий, README, `CHANGELOG` и память их не писать.
+
+## Проверка вживую
+
+Боту пишет владелец (у агента второй поллер даёт `409 Conflict`). После
+рестарта просить у него `/status` и одно сообщение в привязанную сессию.

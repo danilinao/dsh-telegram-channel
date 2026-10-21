@@ -57,31 +57,19 @@ upstream  https://github.com/hi-wenw/dsh-telegram-channel.git
 `resolveSessionTitle`), `src/bridge.ts` (`sessionButtonText`, `ensureSessionNames`),
 `src/client.ts` + `src/bridge.ts` (профиль бота).
 
-## Сборка: `lib/` — исполняемый код
+## Сборка
 
-DSH грузит пакет через `main: lib/index.js`, поэтому правки вносятся **в `src/*.ts`
-и в `lib/*.js` параллельно**. На хосте, где велась работа, не было toolchain:
-
-- `pnpm add -D typescript` падает: peer-зависимости тянут
-  `@deepseek-ai/dsh-type-meta`, которого нет в npm (404);
-- `npm install` отваливается по таймауту.
-
-Проверки без сборки:
+`src/` — источник истины, `lib/` — результат сборки (`npm run build`, tsc).
+До 0.8.0 toolchain на хосте не собирался и `lib/` правился руками параллельно с
+`src/`; это дало расхождение (например, `lib/*.d.ts` оставались китайскими).
+Теперь сборка работает, и дублировать код вручную не нужно:
 
 ```bash
-# синтаксис TypeScript (Node 26 умеет strip-types); ERR_MODULE_NOT_FOUND ожидаем —
-# это резолв peer-пакетов вне рантайма DSH
-node --experimental-strip-types -e "import('file://$PWD/src/bridge.ts')"
-
-# синтаксис исполняемого JS
-for f in lib/*.js; do node --check "$f"; done
-
-# паритет: все русские литералы из src должны быть и в lib
-# и ни одного китайского литерала в lib (кроме комментариев)
+npm install      # tsc, tsx, @types/node + peer-пакеты DSH для типов
+npm run check    # typecheck → build → 62 теста → проверка свежести lib/
 ```
 
-Когда появится машина с доступным npm: `pnpm add -D typescript @types/node && pnpm build`
-перезапишет `lib/` из `src/` — ручное дублирование тогда можно прекратить.
+Подробности и публикация — в [BUILD.md](BUILD.md).
 
 ## Установка и версия
 
@@ -94,17 +82,19 @@ systemctl restart dsh        # плагин монтируется только 
 > старом месте `/home/alexey/dsh-plugins/dsh-telegram-channel` оставлен симлинк
 > на него — профиль `web` по-прежнему ссылается на старый путь.
 
-DSH проверяет совместимость по **точной** версии пакета, поэтому для `0.4.0`
-выдано исключение:
+С 0.8.0 peer-диапазоны `@deepseek-ai/dsh*` рассчитаны на текущий рантайм
+(`^0.2.1-alpha.2`), поэтому исключение `allow-version` больше не требуется.
+Если хост обновится до несовместимой версии, DSH откажется грузить плагин —
+тогда выдаётся исключение:
 
 ```bash
-dsh plugin --profile web allow-version dsh-telegram-channel@0.4.0 \
-  --dsh-version 0.2.1-alpha.2 --accept-risk
+dsh plugin --profile web allow-version dsh-telegram-channel@<версия> \
+  --dsh-version <версия dsh> --accept-risk
 ```
 
-Исключение хранится в профиле, рядом с `package.json`; при смене версии пакета
-его нужно выдать заново. Плагин подключается как `link:` — правки в репозитории
-применяются после перезапуска `dsh`, без пересборки из npm.
+Исключения копятся в `~/.dsh/profiles/web/compatibility.json`. Плагин
+подключается как `link:` — правки в репозитории применяются после перезапуска
+`dsh`.
 
 ## Синхронизация с оригиналом
 
@@ -114,9 +104,10 @@ git log --oneline upstream/master..HEAD        # что у нас сверху
 git rebase upstream/master                     # перенести наши коммиты на свежий оригинал
 ```
 
-После ребейза обязательно: прогнать проверки из раздела «Сборка», перевести новые
-строки (`git grep -n '[一-龥]' src/`), продублировать их в `lib/` и убедиться, что
-китайских литералов в `lib/` не осталось.
+После ребейза обязательно: `npm run check` и перевод новых строк
+(`python3 -c "import re,sys;..."` или `git grep -nP '[\x{4e00}-\x{9fff}]' src/`
+на ripgrep). Русские тексты живут в `src/commands.ts`, в `lib/` они попадают
+сборкой.
 
 ## Публикация
 

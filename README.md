@@ -67,10 +67,25 @@ Telegram-пульт для **DeepSeek Harness**: телефон подключа
 
 ## Установка
 
+Из npm:
+
 ```bash
-dsh plugin --profile web add link:/путь/к/dsh-telegram-channel
+dsh plugin --profile web add dsh-telegram-channel
 systemctl restart dsh           # плагин монтируется при старте
 ```
+
+Из репозитория (разработка) — плагин подключается как `link:` и исполняется
+прямо из папки проекта:
+
+```bash
+git clone https://github.com/danilinao/dsh-telegram-channel
+dsh plugin --profile web add link:$PWD/dsh-telegram-channel
+systemctl restart dsh
+```
+
+В репозитории лежит уже собранный `lib/`, так что клон работает без сборки.
+Если правите код — соберите заново (`src/` → `lib/`): см.
+[BUILD.md](BUILD.md) (`npm install && npm run check`).
 
 Конфигурация — строка `- id: dsh-telegram-channel` в `~/.dsh/profiles/web/cordis.patch.yml`
 (именно `id`-оверрайд, а не `insert`: id уже вставлен бандлом плагина):
@@ -127,8 +142,11 @@ systemctl restart dsh           # плагин монтируется при с�
 `sessionController.prompt`.
 Проекты и архив — через `workspaceRegistry.create` / `archiveSession`.
 
-Версия `0.4.0`. Проверка совместимости DSH привязана к точной версии пакета,
-поэтому для неё выдано исключение — см. [UPSTREAM.md](UPSTREAM.md).
+Начиная с `0.8.0` peer-зависимости `@deepseek-ai/dsh*` рассчитаны на рантайм
+`0.2.1-alpha.2` (`^0.2.1-alpha.2`), поэтому исключение `allow-version` **не
+нужно**. Если хост обновится до несовместимой версии, DSH откажется грузить
+плагин — тогда либо правятся диапазоны, либо выдаётся исключение (см.
+[BUILD.md](BUILD.md)).
 
 ## Происхождение и лицензия
 
@@ -237,8 +255,12 @@ dsh plugin --profile web add link:/path/to/dsh-telegram-channel
 systemctl restart dsh        # the plugin is mounted at startup only
 ```
 
-The plugin runs from the checkout through a `link:` dependency, so edits apply
-after a `dsh` restart — no npm publish or rebuild is needed.
+Or install the published package instead of the checkout:
+`dsh plugin --profile web add dsh-telegram-channel`.
+
+The repository ships a built `lib/`, so a clone runs as-is. If you edit `src/`,
+rebuild it (`npm install && npm run check`) — DSH executes `lib/index.js`, never
+the TypeScript sources. See [BUILD.md](BUILD.md).
 
 ### Configuration
 
@@ -338,15 +360,17 @@ the same content parts the web UI sends. Projects and archiving use
 `workspaceRegistry.archiveSession(id, { stopActivity: true })`, so an archived
 session is stopped rather than left burning tokens.
 
-The package version is `0.4.0`. DSH checks compatibility against an **exact**
-package version, so an exemption is required:
+Since `0.8.0` the `@deepseek-ai/dsh*` peer ranges target the current runtime
+(`^0.2.1-alpha.2`), so **no `allow-version` exemption is needed**. If the host
+moves to an incompatible version, DSH refuses to load the plugin — either widen
+the ranges or grant the exemption:
 
 ```bash
-dsh plugin --profile web allow-version dsh-telegram-channel@0.4.0 \
-  --dsh-version 0.2.1-alpha.2 --accept-risk
+dsh plugin --profile web allow-version dsh-telegram-channel@<version> \
+  --dsh-version <dsh version> --accept-risk
 ```
 
-The exemption is stored per profile; bump the version and you must grant it again.
+Exemptions are stored per profile in `~/.dsh/profiles/web/compatibility.json`.
 
 ## Troubleshooting
 
