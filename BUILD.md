@@ -104,11 +104,49 @@ npm version minor --no-git-tag-version   # или major/patch — поднима
 npm run check                            # всё зелёное
 git commit -am "release: vX.Y.Z"
 git tag vX.Y.Z && git push origin main --tags
-./PUBLISH.sh                             # то же самое, но с токеном из хранилища DSH
+./PUBLISH.sh                             # GitHub, токен из хранилища DSH
+./PUBLISH-npm.sh                         # npm, токен NPM_TOKEN из хранилища DSH
 ```
 
 Релиз (GitHub) делается на каждое **крупное** изменение: заголовок — версия,
 описание — из `CHANGELOG.md`. Мелкие правки едут обычными коммитами.
+
+### npm
+
+Пакет живёт на npm как `dsh-telegram-channel` (владелец `lex1133`).
+`./PUBLISH-npm.sh` берёт токен из `~/.dsh/.credentials.yaml` (ключ `NPM_TOKEN`),
+кладёт его во временный `npmrc` (0600, удаляется по выходу) и вызывает
+`npm publish`; `--dry-run` показывает состав без публикации. В `~/.npmrc`,
+`.git/config` и историю shell токен не попадает.
+
+Что стоит знать, если публикация ведёт себя странно:
+
+- **У аккаунта включено staged publishing + 2FA.** Первый `npm publish`
+  не падает, а создаёт в реестре версию-заглушку `0.0.0-stage` («Temporary
+  Holding Version») и держит настоящую версию до подтверждения 2FA.
+  `npm stage list` при этом может показывать пусто — надёжнее смотреть
+  авторизованный packument:
+  `curl -H "Authorization: Bearer $NPM_TOKEN" https://registry.npmjs.org/dsh-telegram-channel`
+  — в нём видно и заглушку, и ожидающую версию (`dist-tags.latest`).
+- **Повторная отправка той же версии.** `npm stage publish` (или повторный
+  `npm publish`) уже существующую версию не отправит:
+  `You cannot publish over the previously published versions: X.Y.Z` — это
+  значит, что версия уже принята, и надо просто проверить реестр.
+- **Заглушка `0.0.0-stage`** остаётся в списке версий, если версия ушла вторым
+  заходом. Удалить её может только владелец на сайте npm (или токен с правом
+  bypass 2FA): `npm unpublish` из-под granular-токена отвечает
+  `403 Granular access tokens that bypass two-factor authentication may not
+  perform this action`. На установку она не влияет — `dist-tags.latest`
+  указывает на настоящую версию.
+
+Проверка после публикации:
+
+```bash
+curl -s https://registry.npmjs.org/dsh-telegram-channel | python3 -c \
+  "import json,sys;d=json.load(sys.stdin);print(d['dist-tags'],list(d['versions']))"
+cd /tmp && npm i dsh-telegram-channel@<версия> && node -p \
+  "require('/tmp/node_modules/dsh-telegram-channel/package.json').version"
+```
 
 ## English (short)
 

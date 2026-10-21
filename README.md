@@ -67,7 +67,7 @@ Telegram-пульт для **DeepSeek Harness**: телефон подключа
 
 ## Установка
 
-Из npm:
+Из npm — [`dsh-telegram-channel`](https://www.npmjs.com/package/dsh-telegram-channel):
 
 ```bash
 dsh plugin --profile web add dsh-telegram-channel

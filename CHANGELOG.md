@@ -15,6 +15,11 @@
   текущего `src/` (паритет экспортов и текстов команд).
 - `BUILD.md` — сборка, проверки, упаковка, установка, релизный цикл.
 - `CHANGELOG.md` (этот файл).
+- **Опубликовано на npm** —
+  [`dsh-telegram-channel@0.8.0`](https://www.npmjs.com/package/dsh-telegram-channel):
+  плагин ставится без клонирования (`dsh plugin --profile web add
+  dsh-telegram-channel`). Публикация — `./PUBLISH-npm.sh`, токен `NPM_TOKEN` из
+  хранилища DSH.
 
 ### Исправлено
 - **Живые сессии больше не считаются пустыми.** Сессия из `catalogFromLiveAgents`

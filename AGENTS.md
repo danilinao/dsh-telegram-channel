@@ -48,12 +48,18 @@ Telegram-пульт для DeepSeek Harness: плагин `dsh-telegram-channel`
   --no-git-tag-version` → запись в `CHANGELOG.md` → коммит → `git tag vX.Y.Z` →
   `git push origin main --tags` (или `./PUBLISH.sh`, он берёт токен из хранилища
   DSH) → GitHub Release с описанием из `CHANGELOG.md`.
-- npm-публикация пока не настроена: на хосте нет npm-токена (`npm whoami` →
-  `ENEEDAUTH`). Пакет к ней готов (`npm pack`, `prepublishOnly`).
+- npm-публикация настроена: пакет `dsh-telegram-channel` на npm (владелец
+  `lex1133`), токен — `NPM_TOKEN` в `~/.dsh/.credentials.yaml`, публикует
+  `./PUBLISH-npm.sh` (`--dry-run` — только показать состав). У аккаунта
+  включены 2FA и staged publishing: первая отправка создаёт в реестре заглушку
+  `0.0.0-stage` и держит версию до подтверждения 2FA; повторный `npm publish`
+  ответит `You cannot publish over the previously published versions` — это
+  признак, что версия уже принята. Подробности и способы проверки — в
+  [BUILD.md](BUILD.md#npm).
 
 ## Секреты
 
-Токен бота и `GITHUB_TOKEN` живут только в
+Токен бота, `GITHUB_TOKEN` и `NPM_TOKEN` живут только в
 `~/.dsh/profiles/web/cordis.patch.yml` и `~/.dsh/.credentials.yaml`.
 В репозиторий, README, `CHANGELOG` и память их не писать.
 
