@@ -19,7 +19,7 @@ echo "репозиторий: $URL"
 echo "ветка:       $(git rev-parse --abbrev-ref HEAD)"
 echo "коммиты:"
 git log --oneline -3 | sed 's/^/  /'
-echo "теги:        $(git tag -l 'ru-*' | tr '\n' ' ')"
+echo "теги:        $(git tag -l | tr '\n' ' ')"
 
 if [ "${1:-}" = "--dry-run" ]; then
   echo "(dry-run) git push --dry-run $REMOTE HEAD --tags"
