@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { appendFileSync, mkdirSync, statSync } from 'node:fs'
+import { appendFileSync, mkdirSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
@@ -210,6 +210,29 @@ export function hostService<T>(ctx: Context, name: string): T | undefined {
   return undefined
 }
 
+/** Host services answer either an array or an envelope; unwrap both. */
+function asRows<T>(value: unknown): T[] | undefined {
+  if (Array.isArray(value)) return value as T[]
+  if (value && typeof value === 'object') {
+    const box = value as Record<string, unknown>
+    for (const key of ['items', 'records', 'rows', 'sessions', 'workspaces', 'value', 'data']) {
+      const inner = box[key]
+      if (Array.isArray(inner)) return inner as T[]
+    }
+  }
+  return undefined
+}
+
+function describeShape(value: unknown): string {
+  if (value === null || value === undefined) return String(value)
+  if (Array.isArray(value)) return `array(${value.length})`
+  if (typeof value === 'object') {
+    const keys = Object.keys(value as object).slice(0, 8).join(',')
+    return `object{${keys}}`
+  }
+  return typeof value
+}
+
 function hostServices(ctx: Context): HostServices {
   return {
     sessionController: hostService<HostServices['sessionController']>(ctx, 'sessionController'),
@@ -239,14 +262,24 @@ async function loadCatalogFromHost(ctx: Context): Promise<CatalogSnapshot | unde
   let items: SessionListItem[]
   let registry: Array<{ id: string; path: string; title: string; sessionIds: string[] }>
   try {
-    items = await listSessions.call(sessionController)
-    registry = listWorkspaces.call(workspaceRegistry)
+    const rawSessions: unknown = await listSessions.call(sessionController)
+    const rawRegistry: unknown = listWorkspaces.call(workspaceRegistry)
+    debugLog(`loadCatalogFromHost: raw sessions=${describeShape(rawSessions)} registry=${describeShape(rawRegistry)}`)
+    const unwrappedSessions = asRows<SessionListItem>(rawSessions)
+    const unwrappedRegistry = asRows<{ id?: string; workspaceId?: string; path?: string; title?: string; sessionIds?: string[] }>(rawRegistry)
+    if (!unwrappedSessions || !unwrappedRegistry) {
+      debugLog(`loadCatalogFromHost: cannot unwrap sessions/registry (${describeShape(rawSessions)} / ${describeShape(rawRegistry)})`)
+      return undefined
+    }
+    items = unwrappedSessions
+    registry = unwrappedRegistry.map((w) => ({
+      id: String(w.id ?? w.workspaceId ?? w.path ?? ''),
+      path: String(w.path ?? ''),
+      title: String(w.title ?? ''),
+      sessionIds: (w.sessionIds ?? []).map(String),
+    }))
   } catch (err) {
     debugLog(`loadCatalogFromHost: list() threw ${String(err)}`)
-    return undefined
-  }
-  if (!Array.isArray(items) || !Array.isArray(registry)) {
-    debugLog(`loadCatalogFromHost: unexpected shapes items=${typeof items} registry=${typeof registry}`)
     return undefined
   }
 
@@ -322,6 +355,110 @@ export async function resolveSessionTitle(
   }
 }
 
+/**
+ * Catalog read straight from the DSH store on disk.
+ *
+ * Last resort on purpose: it needs no host service, so "покажи все проекты"
+ * keeps working even when the service surface changes between DSH versions.
+ * Sources: `storages/workspace.json` (registry order, titles, session ids and
+ * the archive set) + `storages/session_projcache/sessions/*.json` (cached
+ * titles / first messages).
+ */
+export function loadCatalogFromDisk(ctx: Context): CatalogSnapshot | undefined {
+  const home = process.env.DSH_HOME ?? join(homedir(), '.dsh')
+  const storeFile = join(home, 'storages', 'workspace.json')
+  let store: {
+    global?: { workspaceIds?: string[]; archivedSessionIds?: string[] }
+    tables?: { workspaces?: Record<string, { path?: string; title?: string; sessionIds?: string[] }> }
+  }
+  try {
+    store = JSON.parse(readFileSync(storeFile, 'utf8')) as typeof store
+  } catch (err) {
+    debugLog(`loadCatalogFromDisk: cannot read ${storeFile}: ${String(err)}`)
+    return undefined
+  }
+  const table = store.tables?.workspaces ?? {}
+  const order = store.global?.workspaceIds ?? Object.keys(table)
+  const archivedIds = new Set<string>((store.global?.archivedSessionIds ?? []).map(String))
+
+  // Cached titles / first messages per session.
+  const cacheDir = join(home, 'storages', 'session_projcache', 'sessions')
+  const cached = new Map<string, { title?: string; first?: string; at: number }>()
+  try {
+    for (const file of readdirSync(cacheDir)) {
+      if (!file.endsWith('.json')) continue
+      const sessionId = `session-${file.slice(0, -'.json'.length)}`
+      try {
+        const doc = JSON.parse(readFileSync(join(cacheDir, file), 'utf8')) as {
+          record?: { rows?: Record<string, { val?: { title?: string; first?: { text?: string } } | string | null }> }
+        }
+        const rows = doc.record?.rows ?? {}
+        const titleRow = rows.title?.val
+        const inputRow = rows.titleInput?.val
+        cached.set(sessionId, {
+          title: typeof titleRow === 'string' && titleRow.trim() ? titleRow.trim() : undefined,
+          first: inputRow && typeof inputRow === 'object' && inputRow.first?.text ? inputRow.first.text : undefined,
+          at: statSync(join(cacheDir, file)).mtimeMs,
+        })
+      } catch {
+        // one unreadable cache file must not sink the catalog
+      }
+    }
+  } catch {
+    // no cache yet — titles fall back to the projection-less path
+  }
+
+  const live = (ctx as Context & { agents?: { get?: (id: string) => { status?: string } | undefined } }).agents
+  const sessionsById = new Map<string, SessionRow>()
+  const workspaces: WorkspaceRow[] = []
+  for (const id of order) {
+    const row = table[id]
+    if (!row) continue
+    const workspaceId = String(id)
+    const sessionIds = (row.sessionIds ?? []).map(String)
+    for (const sessionId of sessionIds) {
+      const hit = cached.get(sessionId)
+      let running = false
+      try {
+        running = live?.get?.(sessionId)?.status === 'running'
+      } catch {
+        running = false
+      }
+      sessionsById.set(sessionId, {
+        sessionId,
+        title: titleOf({
+          sessionId,
+          cwd: row.path,
+          updatedAt: hit?.at,
+          projections: {
+            values: {
+              title: hit?.title ?? null,
+              titleInput: hit?.first ? { first: { text: hit.first } } : null,
+            },
+          },
+        }),
+        named: Boolean(hit?.title || hit?.first),
+        cwd: row.path,
+        blank: false,
+        running,
+        updatedAt: hit?.at ?? 0,
+      })
+    }
+    workspaces.push({
+      id: workspaceId,
+      title: row.title || workspaceName(row.path) || workspaceId,
+      path: row.path ?? '',
+      sessionIds,
+    })
+  }
+  if (workspaces.length === 0) {
+    debugLog('loadCatalogFromDisk: no workspaces in the registry file')
+    return undefined
+  }
+  debugLog(`loadCatalogFromDisk: ok workspaces=${workspaces.length} sessions=${sessionsById.size} archived=${archivedIds.size}`)
+  return { workspaces, sessionsById, archivedIds, complete: true }
+}
+
 /** Load workspaces + sessions aligned with Web UI (via apiProxy when available). */
 export async function loadCatalog(ctx: Context): Promise<CatalogSnapshot | undefined> {
   const api = resolveApiProxy(ctx)
@@ -331,7 +468,10 @@ export async function loadCatalog(ctx: Context): Promise<CatalogSnapshot | undef
   // No apiProxy (dsh >= 0.2) → read the same data from host services.
   if (!wsPromise || !sessPromise) {
     debugLog(`loadCatalog: apiProxy unavailable (workspace.list=${typeof api?.workspace?.list}, sessions.list=${typeof api?.sessions?.list}) → host services`)
-    return loadCatalogFromHost(ctx)
+    const viaHost = await loadCatalogFromHost(ctx)
+    if (viaHost) return viaHost
+    debugLog('loadCatalog: host services gave nothing → disk store')
+    return loadCatalogFromDisk(ctx)
   }
 
   const [wsRaw, sessRaw] = await Promise.all([wsPromise, sessPromise])
