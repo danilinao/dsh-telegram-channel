@@ -1,11 +1,23 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { rmSync } from 'node:fs'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import type { UserMessage } from '@deepseek-ai/dsh-llm/types'
 import { SessionId } from '@deepseek-ai/dsh-session/types'
 import { TelegramBridge } from '../src/bridge.ts'
 import type { InlineKeyboardMarkup, TelegramClientLike, TelegramUpdate } from '../src/client.ts'
 import { BIND_CB_PREFIX, LAST_CB, MSG } from '../src/commands.ts'
+
+// The catalog falls back to the on-disk DSH store, so every test must point
+// DSH_HOME at an empty directory — otherwise the developer's real sessions leak
+// into the assertions (and a machine with no sessions cannot reproduce a bug).
+const TEST_HOME = mkdtempSync(join(tmpdir(), 'tg-bridge-test-'))
+process.env.DSH_HOME = TEST_HOME
+process.env.DSH_TELEGRAM_BINDINGS_FILE ??= join(TEST_HOME, 'bindings.json')
+process.on('exit', () => {
+  try { rmSync(TEST_HOME, { recursive: true, force: true }) } catch {}
+})
 
 type SentMessage = {
   chatId: number
@@ -28,6 +40,8 @@ function fakeClient(
     sendChatAction: async () => true,
     answerCallbackQuery: async () => true,
     setMyCommands: async () => true,
+    setMyDescription: async () => true,
+    setMyShortDescription: async () => true,
     getFile: async (fileId: string) => ({ file_id: fileId, file_unique_id: fileId, file_path: `path/${fileId}` }),
     downloadFile: async () => new Uint8Array([1, 2, 3]),
     ...overrides,
@@ -137,7 +151,7 @@ test('/sessions with no sessions shows NO_SESSIONS', async () => {
     sleep: async () => {},
   })
   await bridge.processUpdate(messageUpdate(10, 1, '/sessions'))
-  assert.equal(sent[0]?.text, MSG.NO_SESSIONS)
+  assert.equal(sent[0]?.text, MSG.NO_PROJECTS)
 })
 
 test('/sessions lists workspaces then sessions via callbacks', async () => {
@@ -145,7 +159,7 @@ test('/sessions lists workspaces then sessions via callbacks', async () => {
   const followups: UserMessage[] = []
   const agent = makeAgent('live-aaa', followups, {
     cwd: 'D:/gitData/demo-app',
-    title: '演示会话',
+    title: 'Демо-сессия',
   })
   const ctx = {
     logger: { info() {}, warn() {}, error() {} },
@@ -164,7 +178,7 @@ test('/sessions lists workspaces then sessions via callbacks', async () => {
     sleep: async () => {},
   })
   await bridge.processUpdate(messageUpdate(10, 1, '/sessions'))
-  assert.match(sent[0]!.text, /选择工作区/)
+  assert.match(sent[0]!.text, /Выберите рабочую область/)
   assert.match(sent[0]!.text, /demo-app/)
   assert.equal(sent[0]!.replyMarkup?.inline_keyboard?.[0]?.[0]?.callback_data, 'ws:0')
 
@@ -178,8 +192,8 @@ test('/sessions lists workspaces then sessions via callbacks', async () => {
     },
   })
   const sessionMsg = sent.at(-1)!
-  assert.match(sessionMsg.text, /选择会话/)
-  assert.match(sessionMsg.text, /演示会话/)
+  assert.match(sessionMsg.text, /Выберите сессию/)
+  assert.match(sessionMsg.text, /Демо-сессия/)
   assert.equal(sessionMsg.replyMarkup?.inline_keyboard?.[0]?.[0]?.callback_data, 'sid:0')
 })
 
@@ -217,7 +231,7 @@ test('/sessions via apiProxy shows all workspaces excluding archived', async () 
               running: true,
               blank: false,
               cwd: 'D:/a',
-              projections: { values: { title: '会话一' } },
+              projections: { values: { title: 'Сессия один' } },
             },
             {
               sessionId: 's-archived',
@@ -225,7 +239,7 @@ test('/sessions via apiProxy shows all workspaces excluding archived', async () 
               running: false,
               blank: false,
               cwd: 'D:/a',
-              projections: { values: { title: '已归档' } },
+              projections: { values: { title: 'Архивная' } },
             },
             {
               sessionId: 's2',
@@ -233,7 +247,7 @@ test('/sessions via apiProxy shows all workspaces excluding archived', async () 
               running: false,
               blank: false,
               cwd: 'D:/b',
-              projections: { values: { title: '会话二' } },
+              projections: { values: { title: 'Сессия два' } },
             },
           ],
         }),
@@ -251,7 +265,7 @@ test('/sessions via apiProxy shows all workspaces excluding archived', async () 
   await bridge.processUpdate(messageUpdate(10, 1, '/sessions'))
   assert.match(sent[0]!.text, /Alpha/)
   assert.match(sent[0]!.text, /Beta/)
-  assert.equal(sent[0]!.replyMarkup?.inline_keyboard?.length, 2)
+  assert.equal(sent[0]!.replyMarkup?.inline_keyboard?.length, 3, 'две области + кнопка «новый проект»')
 })
 
 test('callback bind then plain text followups live agent; mirror assistant to chat', async () => {
@@ -294,8 +308,11 @@ test('callback bind then plain text followups live agent; mirror assistant to ch
       data: `${BIND_CB_PREFIX}live-bbb`,
     },
   })
-  assert.match(sent.at(-1)!.text, /已附着/)
-  assert.equal(sent.at(-1)!.replyMarkup?.inline_keyboard?.[0]?.[0]?.callback_data, LAST_CB)
+  assert.ok(sent.some((m) => m.text.startsWith('Сессия привязана')), 'bind confirmation')
+  assert.ok(
+    sent.some((m) => m.replyMarkup?.inline_keyboard?.[0]?.[0]?.callback_data === LAST_CB),
+    'bind card offers the LAST_CB button',
+  )
 
   await bridge.processUpdate(messageUpdate(10, 1, 'hello from phone', 3))
   assert.equal(followups.length, 1)
@@ -320,7 +337,7 @@ test('callback bind then plain text followups live agent; mirror assistant to ch
 test('cold session bind resumes then followups', async () => {
   const sent: SentMessage[] = []
   const followups: UserMessage[] = []
-  const agent = makeAgent('cold-1', followups, { cwd: 'D:/proj', title: '冷会话' })
+  const agent = makeAgent('cold-1', followups, { cwd: 'D:/proj', title: 'Холодная сессия' })
   let resumed = false
   const ctx = {
     logger: { info() {}, warn() {}, error() {} },
@@ -348,7 +365,7 @@ test('cold session bind resumes then followups', async () => {
             running: false,
             blank: false,
             cwd: 'D:/proj',
-            projections: { values: { title: '冷会话' } },
+            projections: { values: { title: 'Холодная сессия' } },
           }],
         }),
       },
@@ -382,7 +399,7 @@ test('cold session bind resumes then followups', async () => {
     },
   })
   assert.equal(resumed, true)
-  assert.match(sent.at(-1)!.text, /已附着/)
+  assert.ok(sent.some((m) => m.text.startsWith('Сессия привязана')), 'bind confirmation')
   await bridge.processUpdate(messageUpdate(10, 1, 'hi cold', 4))
   assert.equal(followups.length, 1)
 })
@@ -438,7 +455,7 @@ test('/model lists and selects via apiProxy', async () => {
     },
   })
   await bridge.processUpdate(messageUpdate(10, 1, '/model', 2))
-  assert.match(sent.at(-1)!.text, /当前模型/)
+  assert.match(sent.at(-1)!.text, /Текущая модель/)
   assert.equal(sent.at(-1)!.replyMarkup?.inline_keyboard?.[0]?.[0]?.callback_data, 'mdl:0')
 
   await bridge.processUpdate({
@@ -455,7 +472,7 @@ test('/model lists and selects via apiProxy', async () => {
     provider: 'deepseek',
     model: 'chat',
   })
-  assert.match(sent.at(-1)!.text, /已切换模型/)
+  assert.match(sent.at(-1)!.text, /Модель переключена/)
 })
 
 test('/model effort picker applies reasoningEffort', async () => {
@@ -531,7 +548,7 @@ test('/model effort picker applies reasoningEffort', async () => {
       data: 'mdl:0',
     },
   })
-  assert.match(sent.at(-1)!.text, /reasoning effort|请选择/)
+  assert.match(sent.at(-1)!.text, /глубину размышлений/)
   assert.equal(sent.at(-1)!.replyMarkup?.inline_keyboard?.[0]?.[0]?.callback_data, 'eff:0')
   await bridge.processUpdate({
     update_id: 4,
@@ -548,21 +565,21 @@ test('/model effort picker applies reasoningEffort', async () => {
     model: 'reasoner',
     reasoningEffort: 'max',
   })
-  assert.match(sent.at(-1)!.text, /已切换模型/)
+  assert.match(sent.at(-1)!.text, /Модель переключена/)
 })
 
 test('/last returns previous Q/A via apiProxy history', async () => {
   const sent: SentMessage[] = []
   const followups: UserMessage[] = []
-  const agent = makeAgent('live-last', followups, { title: '有历史' })
+  const agent = makeAgent('live-last', followups, { title: 'С историей' })
   ;(agent as any).session.events = [
     {
       type: 'user/message',
-      data: { source: { kind: 'user' }, content: [{ type: 'text', text: '手机续接前的问题' }] },
+      data: { source: { kind: 'user' }, content: [{ type: 'text', text: 'вопрос с телефона' }] },
     },
     {
       type: 'assistant/message',
-      data: { message: { content: [{ type: 'text', text: '电脑上的回答' }] } },
+      data: { message: { content: [{ type: 'text', text: 'ответ с компьютера' }] } },
     },
   ]
   const ctx = {
@@ -583,13 +600,13 @@ test('/last returns previous Q/A via apiProxy history', async () => {
                 {
                   event: {
                     type: 'user/message',
-                    data: { source: { kind: 'user' }, content: [{ type: 'text', text: '手机续接前的问题' }] },
+                    data: { source: { kind: 'user' }, content: [{ type: 'text', text: 'вопрос с телефона' }] },
                   },
                 },
                 {
                   event: {
                     type: 'assistant/message',
-                    data: { message: { content: [{ type: 'text', text: '电脑上的回答' }] } },
+                    data: { message: { content: [{ type: 'text', text: 'ответ с компьютера' }] } },
                   },
                 },
               ],
@@ -619,9 +636,9 @@ test('/last returns previous Q/A via apiProxy history', async () => {
   })
   await bridge.processUpdate(messageUpdate(10, 1, '/last', 2))
   const body = sent.at(-1)!.text
-  assert.match(body, /上次对话|用户/)
-  assert.match(body, /手机续接前的问题/)
-  assert.match(body, /电脑上的回答/)
+  assert.match(body, /прошлый диалог/)
+  assert.match(body, /вопрос с телефона/)
+  assert.match(body, /ответ с компьютера/)
 })
 
 test('/unbind clears binding without needing create/dispose', async () => {
@@ -759,22 +776,22 @@ test('/rich on routes replies to sendRichMessage; /rich off reverts to HTML; sta
 
     // /rich (no arg) reports current state.
     await bridge.processUpdate(messageUpdate(10, 1, '/rich', 2))
-    assert.match(sent.at(-1)!.text, /HTML 兼容/)
+    assert.match(sent.at(-1)!.text, /HTML \(off\)/)
 
     // /rich on → assistant replies go through sendRichMessage.
     await bridge.processUpdate(messageUpdate(10, 1, '/rich on', 3))
-    assert.match(sent.at(-1)!.text, /已切换为富文本/)
+    assert.match(sent.at(-1)!.text, /rich-рендер/)
     await emitAssistant('rich-mode reply')
     assert.equal(rich.length, 1)
     assert.match(rich[0]!, /rich-mode reply/)
 
     // /rich on again is idempotent (still one preference, no dupes).
     await bridge.processUpdate(messageUpdate(10, 1, '/rich on', 4))
-    assert.ok(!sent.at(-1)!.text.includes('已切换') || rich.length === 1)
+    assert.ok(!sent.at(-1)!.text.includes('rich-рендер') || rich.length === 1)
 
     // /rich off → back to HTML compat path.
     await bridge.processUpdate(messageUpdate(10, 1, '/rich off', 5))
-    assert.match(sent.at(-1)!.text, /已切换为 HTML/)
+    assert.match(sent.at(-1)!.text, /HTML-рендер/)
     await emitAssistant('compat-mode reply')
     assert.equal(rich.length, 1, 'no new rich send after /rich off')
     assert.ok(sent.some((m) => m.text.includes('compat-mode reply')))
@@ -792,7 +809,7 @@ test('/status shows bind/session/workspace/model/effort/context and web-style st
   const sent: SentMessage[] = []
   const followups: UserMessage[] = []
   const sessionId = 'live-st'
-  const agent = makeAgent(sessionId, followups, { cwd: '/work/proj-a', title: '演示任务' })
+  const agent = makeAgent(sessionId, followups, { cwd: '/work/proj-a', title: 'Демо-задача' })
   const ctx = {
     logger: { info() {}, warn() {}, error() {} },
     agents: {
@@ -877,16 +894,16 @@ test('/status shows bind/session/workspace/model/effort/context and web-style st
   })
   await bridge.processUpdate(messageUpdate(10, 1, '/status', 2))
   const text = sent.at(-1)!.text
-  assert.ok(text.includes('会话 ID：live-st'), text)
-  assert.ok(text.includes('工作区：Proj A（/work/proj-a）'), text)
-  assert.ok(text.includes('模型：deepseek/reasoner'), text)
-  assert.ok(text.includes('思考强度：高（high）'), text)
-  assert.ok(text.includes('上下文：64.5K / 131K tokens（49%）'), text)
-  assert.ok(text.includes('3 轮 · 5 步'), text)
-  assert.ok(text.includes('首 token 平均 0.3s'), text)
+  assert.ok(text.includes('ID сессии: live-st'), text)
+  assert.ok(text.includes('Рабочая область: Proj A (/work/proj-a)'), text)
+  assert.ok(text.includes('Модель: deepseek/reasoner'), text)
+  assert.ok(text.includes('Глубина размышлений: высокая (high)'), text)
+  assert.ok(text.includes('Контекст: 64.5K / 131K токенов (49%)'), text)
+  assert.ok(text.includes('ходов: 3 · шагов: 5'), text)
+  assert.ok(text.includes('средний TTFT 0.3s'), text)
   assert.ok(text.includes('500 tok/s'), text)
-  assert.ok(text.includes('缓存命中'), text)
-  assert.ok(text.includes('输入 24.5K tok · 输出 9K tok'), text)
+  assert.ok(text.includes('кэш '), text)
+  assert.ok(text.includes('вход 24.5K tok · выход 9K tok'), text)
 })
 
 test('/status without bind prompts NEED_BIND', async () => {
@@ -947,14 +964,14 @@ test('/compact compacts bound session and reports result', async () => {
     },
   })
   await bridge.processUpdate(messageUpdate(10, 1, '/compact', 2))
-  assert.ok(sent.some((m) => m.text.includes('已开始压缩')), 'ack sent')
+  assert.ok(sent.some((m) => m.text.includes('Сжатие истории начато')), 'ack sent')
   // runCompaction runs detached; wait for its result notice
-  for (let i = 0; i < 100 && !sent.some((m) => m.text.includes('压缩完成')); i++) {
+  for (let i = 0; i < 100 && !sent.some((m) => m.text.includes('Сжатие завершено')); i++) {
     await new Promise((r) => setTimeout(r, 5))
   }
-  assert.ok(sent.some((m) => m.text.includes('压缩完成')), 'compaction result notice arrives')
+  assert.ok(sent.some((m) => m.text.includes('Сжатие завершено')), 'compaction result notice arrives')
   assert.ok(
-    sent.some((m) => m.text.includes('4 条历史记录（约 12345 tokens）')),
+    sent.some((m) => m.text.includes('объединено записей — 4 (~12345 токенов)')),
     'result mentions shadowed range',
   )
 })
@@ -1001,7 +1018,7 @@ test('/compact busy agent replies COMPACT_BUSY without starting', async () => {
   })
   sent.length = 0 // drop the BOUND message; keep only /compact replies
   await bridge.processUpdate(messageUpdate(10, 1, '/compact', 2))
-  assert.ok(sent.some((m) => m.text.includes('已开始压缩')), 'ack sent')
+  assert.ok(sent.some((m) => m.text.includes('Сжатие истории начато')), 'ack sent')
   for (let i = 0; i < 100 && !sent.some((m) => m.text.includes(MSG.COMPACT_BUSY)); i++) {
     await new Promise((r) => setTimeout(r, 5))
   }
@@ -1146,10 +1163,10 @@ test('photo with caption is admitted via sessions.prompt (largest size, jpeg, ba
     sleep: async () => {},
   })
   await bridge.processUpdate(bindUpdate(10, 1, sessionId))
-  await bridge.processUpdate(photoUpdate(10, 1, 'big-photo', { caption: '看看这张图', updateId: 2 }))
+  await bridge.processUpdate(photoUpdate(10, 1, 'big-photo', { caption: 'посмотри на картинку', updateId: 2 }))
   assert.equal(prompts.length, 1, 'one prompt RPC')
   const content = prompts[0]!.content
-  assert.deepEqual(content[0], { type: 'text', text: '看看这张图' })
+  assert.deepEqual(content[0], { type: 'text', text: 'посмотри на картинку' })
   assert.equal(content[1]?.type, 'image')
   assert.equal(content[1]?.mediaType, 'image/jpeg')
   assert.equal(content[1]?.data, Buffer.from(jpegBytes).toString('base64'))
@@ -1293,7 +1310,7 @@ test('photo download failure replies IMAGE_FAILED', async () => {
     await new Promise((r) => setTimeout(r, 5))
   }
   assert.equal(prompts.length, 0, 'no prompt dispatched')
-  assert.ok(sent.some((m) => m.text.startsWith('图片发送失败。')), 'failure notice')
+  assert.ok(sent.some((m) => m.text.startsWith('Не удалось отправить изображение.')), 'failure notice')
 })
 
 test('photo without bind prompts NEED_BIND and no prompt', async () => {
@@ -1454,7 +1471,7 @@ test('user-questions/request announces when the Web answer wins', async () => {
   resolveGui('web answer')
   assert.equal(await answer, 'web answer')
   await new Promise<void>((resolve) => setImmediate(resolve))
-  assert.ok(sent.some((message) => message.text.includes('该问题已在 Web 端作答')))
+  assert.ok(sent.some((message) => message.text.includes('На вопрос уже ответили в Web')))
 
   await bridge.processUpdate(messageUpdate(10, 1, 'follow-up', 2))
   assert.equal(followups.length, 1, 'the answered question is removed from the Telegram pending state')

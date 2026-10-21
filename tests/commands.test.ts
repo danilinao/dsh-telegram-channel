@@ -32,13 +32,15 @@ test('parse /rich with optional mode argument', () => {
   assert.equal(parseCommand('/setting html').type === 'rich' && parseCommand('/setting html').arg, 'html')
 })
 
-test('Chinese copy mentions sessions and bind', () => {
-  assert.ok(MSG.DENIED.includes('权限') || MSG.DENIED.includes('授权'))
+test('Русские тексты: отказ, справка, приглашение', () => {
+  assert.match(MSG.DENIED, /Нет доступа/)
   assert.ok(MSG.HELP.includes('/sessions'))
   assert.ok(MSG.HELP.includes('/last'))
   assert.ok(MSG.HELP.includes('/model'))
   assert.ok(MSG.NEED_BIND.includes('/sessions'))
-  assert.ok(MSG.WELCOME.includes('Web') || MSG.WELCOME.includes('遥控器'))
+  assert.match(MSG.WELCOME, /DeepSeek Harness/)
+  // Ни одной китайской строки в пользовательских текстах не осталось.
+  assert.doesNotMatch(MSG.HELP + MSG.WELCOME + MSG.DENIED + MSG.NEED_BIND, /[\u4e00-\u9fff]/)
 })
 
 test('parse /compact', () => {
