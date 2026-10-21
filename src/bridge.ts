@@ -12,6 +12,7 @@ import { isAuthorized } from './auth.js'
 import { resolveApiProxy } from './apiproxy.js'
 import {
   catalogFromLiveAgents,
+  hostService,
   resolveSessionTitle,
   loadCatalog,
   truncateButton,
@@ -1886,26 +1887,42 @@ export class TelegramBridge {
       // Catalog unavailable → fall back to the host default workspace.
     }
     const proxy = resolveApiProxy(this.ctx)
+    const payload = workspaceId !== undefined ? { workspaceId } : (fallbackCwd ? { cwd: fallbackCwd } : {})
+    let newId: string | undefined
     if (!proxy?.sessions?.create) {
-      await this.client.sendMessage(chatId, 'Хост не поддерживает создание сессий')
-      return
-    }
-    let res: { result?: { ok?: boolean; value?: { sessionId?: string }; error?: { message?: string } } } | undefined
-    try {
-      const payload = workspaceId !== undefined ? { workspaceId } : (fallbackCwd ? { cwd: fallbackCwd } : {})
-      res = await proxy.sessions.create({
-        rpcId: `tg-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-        payload,
-      }) as typeof res
-    } catch (err) {
-      await this.client.sendMessage(chatId, `Не удалось создать: ${this.redact(err)}`)
-      return
-    }
-    const newId = res?.result?.ok ? res.result.value?.sessionId : undefined
-    if (!newId) {
-      const detail = res?.result?.error?.message ?? JSON.stringify(res?.result ?? res)
-      await this.client.sendMessage(chatId, `Не удалось создать: ${String(detail).slice(0, 200)}`)
-      return
+      // dsh 0.2: no apiProxy — `sessionController.create` is the host's own route.
+      const controller = hostService<{
+        create?: (request: typeof payload) => Promise<{ sessionId?: string }>
+      }>(this.ctx, 'sessionController')
+      if (typeof controller?.create !== 'function') {
+        await this.client.sendMessage(chatId, 'Хост не поддерживает создание сессий')
+        return
+      }
+      try {
+        const created = await controller.create.call(controller, payload)
+        newId = created?.sessionId
+        if (!newId) throw new Error('хост не вернул идентификатор сессии')
+      } catch (err) {
+        await this.client.sendMessage(chatId, `Не удалось создать: ${this.redact(err)}`)
+        return
+      }
+    } else {
+      let res: { result?: { ok?: boolean; value?: { sessionId?: string }; error?: { message?: string } } } | undefined
+      try {
+        res = await proxy.sessions.create({
+          rpcId: `tg-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+          payload,
+        }) as typeof res
+      } catch (err) {
+        await this.client.sendMessage(chatId, `Не удалось создать: ${this.redact(err)}`)
+        return
+      }
+      newId = res?.result?.ok ? res.result.value?.sessionId : undefined
+      if (!newId) {
+        const detail = res?.result?.error?.message ?? JSON.stringify(res?.result ?? res)
+        await this.client.sendMessage(chatId, `Не удалось создать: ${String(detail).slice(0, 200)}`)
+        return
+      }
     }
     const stale = this.pendingAsks.get(String(chatId))
     if (stale && stale.sessionId !== String(newId)) this.pendingAsks.delete(String(chatId))

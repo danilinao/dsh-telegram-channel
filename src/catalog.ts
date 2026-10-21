@@ -150,7 +150,7 @@ interface SessionListItem {
 }
 
 /** Read a host service defensively: `ctx.get` throws for services it cannot see. */
-function hostService<T>(ctx: Context, name: string): T | undefined {
+export function hostService<T>(ctx: Context, name: string): T | undefined {
   const get = (ctx as Context & { get?: (service: string, strict?: boolean) => unknown }).get
   if (typeof get !== 'function') return undefined
   try {
