@@ -122,3 +122,28 @@ test('configSignature changes when behavior changes and never leaks into the log
   assert.notEqual(configSignature(base), configSignature(resolveConfig({ token: 'a', users: [{ id: 1, enabled: false }] }, {} as NodeJS.ProcessEnv)))
   assert.notEqual(configSignature(base), configSignature(resolveConfig({ token: 'a', users: [{ id: 2 }] }, {} as NodeJS.ProcessEnv)))
 })
+
+test('every Config field is volatile, and the token is a secret', async () => {
+  // DSH only builds a settings form for an entry with volatile fields, and only
+  // volatile paths may be written from the GUI — a plain field would silently
+  // disappear from the page. `role('secret')` keeps the token out of the browser.
+  const { Config } = await import('../src/index.ts')
+  const dict = (Config as unknown as { dict: Record<string, { meta?: { volatile?: boolean; role?: string } }> }).dict
+  assert.deepEqual(
+    Object.keys(dict).sort(),
+    ['allowAllUsers', 'allowedUserIds', 'maxMessageLength', 'pollingTimeoutSec', 'rendering', 'token', 'users'],
+  )
+  for (const [key, field] of Object.entries(dict)) {
+    assert.equal(field.meta?.volatile, true, `${key} должен быть .volatile()`)
+  }
+  assert.equal(dict.token.meta?.role, 'secret', 'token должен быть .role(\'secret\')')
+  // The host serializes the schema into the settings wire document and reads
+  // the form schema back through it.
+  const wire = JSON.parse(JSON.stringify(Config.toJSON())) as {
+    uid: number
+    refs: Record<string, { type?: string; dict?: Record<string, unknown> }>
+  }
+  const root = wire.refs[String(wire.uid)]
+  assert.equal(root?.type, 'object')
+  assert.deepEqual(Object.keys(root?.dict ?? {}).sort(), Object.keys(dict).sort())
+})
