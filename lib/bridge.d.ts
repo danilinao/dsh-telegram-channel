@@ -1,20 +1,41 @@
 import type { Context } from '@deepseek-ai/cordis';
+import type { TelegramUserEntry } from './config.js';
 import { type TelegramClientLike, type TelegramUpdate } from './client.js';
 export interface TelegramBridgeOptions {
     token: string;
     allowedUserIds: number[];
     allowAllUsers: boolean;
+    /** GUI-managed allowlist; `allowedUserIds` already carries the effective ids. */
+    users?: TelegramUserEntry[];
     client?: TelegramClientLike;
     sleep?: (ms: number) => Promise<void>;
     maxMessageLength?: number;
     pollingTimeoutSec?: number;
     rendering?: 'rich' | 'html';
+    /** `getUpdates` offset carried over from the previous bridge instance. */
+    offset?: number;
+}
+/** One person the bot has seen in an update (kept for the Web settings page). */
+export interface KnownPerson {
+    id: number;
+    name?: string;
+    username?: string;
+    /** Unix ms of the last update from this person. */
+    at: number;
+}
+/** Bot identity reported by `getMe`, cached for the Web settings page. */
+export interface BotIdentity {
+    id: number;
+    username?: string;
+    name?: string;
 }
 export declare class TelegramBridge {
     private readonly ctx;
     private readonly token;
     private readonly allowedUserIds;
     private readonly allowAllUsers;
+    /** Normalized GUI-managed allowlist (may be empty on legacy configs). */
+    private readonly users;
     private readonly client;
     private readonly sleep;
     private readonly maxMessageLength;
@@ -36,6 +57,16 @@ export declare class TelegramBridge {
     private readonly notifyScope;
     /** Чаты, которые вообще писали боту: им можно присылать уведомления. */
     private readonly knownChats;
+    /** People seen in updates: filled for the Web settings page (names, usernames). */
+    private readonly people;
+    /** Bot identity from `getMe`; refreshed on start and on demand. */
+    private botInfo?;
+    /** Why `getMe` failed (bad token, offline) — surfaced in the Web settings. */
+    private botError?;
+    /** When `botInfo`/`botError` was last written (ms). */
+    private botCheckedAt;
+    /** id → ms of a failed `getChat`, so a settings page refresh cannot hammer the API. */
+    private readonly chatLookupFailed;
     /** Последний загруженный каталог — источник имён сессий для уведомлений. */
     private lastCatalog?;
     /** sessionId → накопленные рассуждения текущего шага (уходят спойлером). */
@@ -76,6 +107,61 @@ export declare class TelegramBridge {
     private modeFor;
     start(): void;
     stop(): Promise<void>;
+    /** Last confirmed `getUpdates` offset — carried into the next bridge instance. */
+    get currentOffset(): number | undefined;
+    /** Whether the long-poll loop is running (the Web settings page shows this). */
+    get running(): boolean;
+    /**
+     * Ask Telegram who this token belongs to and cache the answer.
+     * A rejected token is a normal outcome here — it is reported, not thrown, so
+     * the settings page can say “Telegram did not accept this token”.
+     * @param force - bypass the cache (the settings page's Refresh button).
+     */
+    refreshBotInfo(force?: boolean): Promise<void>;
+    /** The cached bot identity / error, refreshing once when nothing is cached yet. */
+    selectedBot(): Promise<{
+        bot?: BotIdentity;
+        error?: string;
+        checkedAt: number;
+    }>;
+    /**
+     * Everything the Web settings page shows about the running bot: identity,
+     * the allowlist as configured, and the people the bot has actually seen.
+     * The token itself never crosses this boundary.
+     */
+    describeSettings(): Promise<{
+        running: boolean;
+        tokenSet: boolean;
+        bot?: BotIdentity;
+        error?: string;
+        allowAllUsers: boolean;
+        users: Array<TelegramUserEntry & {
+            name?: string;
+            username?: string;
+            bound: boolean;
+        }>;
+        people: KnownPerson[];
+        bindings: Array<{
+            chatId: number;
+            sessionId: string;
+            label: string;
+        }>;
+    }>;
+    /**
+     * Resolve one person the owner typed: a numeric id or an `@username`.
+     * `getChat` is the only Bot API call that finds a user by handle, and it only
+     * answers for users the bot has interacted with.
+     * @param query - `@name`, `name`, or a numeric Telegram user id.
+     */
+    resolvePerson(query: string): Promise<{
+        id: number;
+        name?: string;
+        username?: string;
+    }>;
+    /** Configured people, with the legacy flat list presented as entries of its own. */
+    private effectiveEntries;
+    /** Record the person behind an update (name and @username for the settings page). */
+    private rememberPerson;
     processUpdate(update: TelegramUpdate): Promise<void>;
     private handleCallback;
     private resolveCatalog;

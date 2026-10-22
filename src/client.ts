@@ -14,6 +14,11 @@ export interface TelegramChat {
   username?: string
 }
 
+/** `getChat` result for a private chat: the user's display fields ride on the chat. */
+export interface TelegramChatInfo extends TelegramChat {
+  first_name?: string
+  last_name?: string
+}
 export interface TelegramPhotoSize {
   file_id: string
   file_unique_id: string
@@ -91,7 +96,9 @@ export interface TelegramClientOptions {
 
 export interface TelegramClientLike {
   getMe(): Promise<TelegramUser>
-  getUpdates(offset?: number): Promise<TelegramUpdate[]>
+  /** `getChat` — resolves an id or `@username`; optional so partial mocks still satisfy the type. */
+  getChat?(chatId: number | string): Promise<TelegramChatInfo>
+  getUpdates(offset?: number, signal?: AbortSignal): Promise<TelegramUpdate[]>
   sendMessage(
     chatId: number,
     text: string,
@@ -157,7 +164,7 @@ export class TelegramClient implements TelegramClientLike {
     return message.split(this.token).join('***')
   }
 
-  private async call<T>(method: string, body?: Record<string, unknown>): Promise<T> {
+  private async call<T>(method: string, body?: Record<string, unknown>, signal?: AbortSignal): Promise<T> {
     const url = `${this.baseUrl}/bot${this.token}/${method}`
     try {
       const init: RequestInit = {
@@ -167,6 +174,9 @@ export class TelegramClient implements TelegramClientLike {
       if (body !== undefined) {
         init.body = JSON.stringify(body)
       }
+      // A long poll holds the request open for `pollingTimeoutSec`; without the
+      // signal a config reload (or shutdown) would wait for it to return.
+      if (signal !== undefined) init.signal = signal
       const response = await this.fetchImpl(url, init)
       const json = (await response.json()) as { ok: boolean; result: T; description?: string }
       if (!json.ok) {
@@ -183,7 +193,11 @@ export class TelegramClient implements TelegramClientLike {
     return this.call<TelegramUser>('getMe')
   }
 
-  async getUpdates(offset?: number): Promise<TelegramUpdate[]> {
+  async getChat(chatId: number | string): Promise<TelegramChatInfo> {
+    return this.call<TelegramChatInfo>('getChat', { chat_id: chatId })
+  }
+
+  async getUpdates(offset?: number, signal?: AbortSignal): Promise<TelegramUpdate[]> {
     const body: Record<string, unknown> = {
       timeout: this.pollingTimeoutSec,
       allowed_updates: ['message', 'callback_query'],
@@ -191,7 +205,7 @@ export class TelegramClient implements TelegramClientLike {
     if (offset !== undefined) {
       body.offset = offset
     }
-    return this.call<TelegramUpdate[]>('getUpdates', body)
+    return this.call<TelegramUpdate[]>('getUpdates', body, signal)
   }
 
   async sendMessage(

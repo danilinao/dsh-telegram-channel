@@ -9,6 +9,7 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm/message'
 import type { ContentBlock, TextBlock } from '@deepseek-ai/dsh-llm/types'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session/types'
 import { isAuthorized } from './auth.js'
+import type { TelegramUserEntry } from './config.js'
 import { resolveApiProxy } from './apiproxy.js'
 import {
   catalogFromLiveAgents,
@@ -53,11 +54,31 @@ export interface TelegramBridgeOptions {
   token: string
   allowedUserIds: number[]
   allowAllUsers: boolean
+  /** GUI-managed allowlist; `allowedUserIds` already carries the effective ids. */
+  users?: TelegramUserEntry[]
   client?: TelegramClientLike
   sleep?: (ms: number) => Promise<void>
   maxMessageLength?: number
   pollingTimeoutSec?: number
   rendering?: 'rich' | 'html'
+  /** `getUpdates` offset carried over from the previous bridge instance. */
+  offset?: number
+}
+
+/** One person the bot has seen in an update (kept for the Web settings page). */
+export interface KnownPerson {
+  id: number
+  name?: string
+  username?: string
+  /** Unix ms of the last update from this person. */
+  at: number
+}
+
+/** Bot identity reported by `getMe`, cached for the Web settings page. */
+export interface BotIdentity {
+  id: number
+  username?: string
+  name?: string
 }
 
 /** chatId → bound live session id (string form of SessionId) */
@@ -247,6 +268,8 @@ export class TelegramBridge {
   private readonly token: string
   private readonly allowedUserIds: number[]
   private readonly allowAllUsers: boolean
+  /** Normalized GUI-managed allowlist (may be empty on legacy configs). */
+  private readonly users: TelegramUserEntry[]
   private readonly client: TelegramClientLike
   private readonly sleep: (ms: number) => Promise<void>
   private readonly maxMessageLength: number
@@ -269,6 +292,16 @@ export class TelegramBridge {
   private readonly notifyScope = new Map<string, 'bound' | 'every'>()
   /** Чаты, которые вообще писали боту: им можно присылать уведомления. */
   private readonly knownChats = new Set<number>()
+  /** People seen in updates: filled for the Web settings page (names, usernames). */
+  private readonly people = new Map<number, KnownPerson>()
+  /** Bot identity from `getMe`; refreshed on start and on demand. */
+  private botInfo?: BotIdentity
+  /** Why `getMe` failed (bad token, offline) — surfaced in the Web settings. */
+  private botError?: string
+  /** When `botInfo`/`botError` was last written (ms). */
+  private botCheckedAt = 0
+  /** id → ms of a failed `getChat`, so a settings page refresh cannot hammer the API. */
+  private readonly chatLookupFailed = new Map<number, number>()
   /** Последний загруженный каталог — источник имён сессий для уведомлений. */
   private lastCatalog?: CatalogSnapshot
   /** sessionId → накопленные рассуждения текущего шага (уходят спойлером). */
@@ -312,11 +345,15 @@ export class TelegramBridge {
     this.token = options.token
     this.allowedUserIds = options.allowedUserIds
     this.allowAllUsers = options.allowAllUsers
+    this.users = options.users ?? []
     this.client = options.client ?? new TelegramClient(options.token, {
       pollingTimeoutSec: options.pollingTimeoutSec ?? 30,
     })
     this.sleep = options.sleep ?? defaultSleep
     this.maxMessageLength = options.maxMessageLength ?? 4096
+    // A live config reload rebuilds the bridge; reusing the last confirmed
+    // offset keeps Telegram from redelivering the updates it already answered.
+    this.offset = options.offset
     // Compat-first default: only an explicit `rendering: 'rich'` opts into rich
     // messages, because old Telegram clients (10.x) cannot render them at all.
     this.renderingMode = options.rendering === 'rich' ? 'rich' : 'html'
@@ -337,6 +374,10 @@ export class TelegramBridge {
     // Restore persisted bindings (survive hot reload / restart) and install
     // the TG answering hooks (ask_user dual-path + approval dual-path).
     this.loadBindings()
+    // Bot identity (`getMe`) feeds the Web settings page's status line; it is
+    // cached and refreshed on demand, so a slow Telegram call never delays the
+    // first poll.
+    void this.refreshBotInfo()
     this.disposeQuestionHook?.()
     this.disposeQuestionHook = (this.ctx as unknown as {
       on: (
@@ -442,6 +483,167 @@ export class TelegramBridge {
     }
   }
 
+  /** Last confirmed `getUpdates` offset — carried into the next bridge instance. */
+  get currentOffset(): number | undefined {
+    return this.offset
+  }
+
+  /** Whether the long-poll loop is running (the Web settings page shows this). */
+  get running(): boolean {
+    return this.polling
+  }
+
+  /**
+   * Ask Telegram who this token belongs to and cache the answer.
+   * A rejected token is a normal outcome here — it is reported, not thrown, so
+   * the settings page can say “Telegram did not accept this token”.
+   * @param force - bypass the cache (the settings page's Refresh button).
+   */
+  async refreshBotInfo(force = false): Promise<void> {
+    if (!force && this.botCheckedAt > 0 && Date.now() - this.botCheckedAt < 60_000) return
+    this.botCheckedAt = Date.now()
+    try {
+      const me = await this.client.getMe()
+      this.botInfo = {
+        id: me.id,
+        ...(me.username === undefined ? {} : { username: me.username }),
+        ...(me.first_name === undefined ? {} : { name: me.first_name }),
+      }
+      this.botError = undefined
+    } catch (err) {
+      this.botInfo = undefined
+      this.botError = this.redact(err)
+    }
+  }
+
+  /** The cached bot identity / error, refreshing once when nothing is cached yet. */
+  async selectedBot(): Promise<{ bot?: BotIdentity; error?: string; checkedAt: number }> {
+    if (this.botCheckedAt === 0) await this.refreshBotInfo()
+    return {
+      ...(this.botInfo === undefined ? {} : { bot: this.botInfo }),
+      ...(this.botError === undefined ? {} : { error: this.botError }),
+      checkedAt: this.botCheckedAt,
+    }
+  }
+
+  /**
+   * Everything the Web settings page shows about the running bot: identity,
+   * the allowlist as configured, and the people the bot has actually seen.
+   * The token itself never crosses this boundary.
+   */
+  async describeSettings(): Promise<{
+    running: boolean
+    tokenSet: boolean
+    bot?: BotIdentity
+    error?: string
+    allowAllUsers: boolean
+    users: Array<TelegramUserEntry & { name?: string; username?: string; bound: boolean }>
+    people: KnownPerson[]
+    bindings: Array<{ chatId: number; sessionId: string; label: string }>
+  }> {
+    const identity = await this.selectedBot()
+    // Name the configured people who never wrote to the bot: `getChat` works
+    // for a user the bot has interacted with, and fails harmlessly otherwise.
+    const lookup = this.client.getChat?.bind(this.client)
+    const unnamed = lookup === undefined
+      ? []
+      : this.effectiveEntries().filter((user) => {
+        const person = this.people.get(user.id)
+        if (person?.name !== undefined || person?.username !== undefined) return false
+        const failedAt = this.chatLookupFailed.get(user.id)
+        return failedAt === undefined || Date.now() - failedAt > 300_000
+      })
+    for (const user of unnamed.slice(0, 10)) {
+      try {
+        const chat = await lookup!(user.id)
+        this.rememberPerson({
+          id: user.id,
+          first_name: chat.first_name,
+          last_name: chat.last_name,
+          username: chat.username,
+        })
+      } catch {
+        // Unknown to Telegram until they start the bot: keep just the number,
+        // and do not ask again for a while.
+        this.chatLookupFailed.set(user.id, Date.now())
+      }
+    }
+    return {
+      running: this.polling,
+      tokenSet: this.token.length > 0,
+      ...(identity.bot === undefined ? {} : { bot: identity.bot }),
+      ...(identity.error === undefined ? {} : { error: identity.error }),
+      allowAllUsers: this.allowAllUsers,
+      users: this.effectiveEntries().map((user) => {
+        const person = this.people.get(user.id)
+        const bound = this.bindings.has(String(user.id))
+        return {
+          ...user,
+          ...(person?.name === undefined ? {} : { name: user.name ?? person.name }),
+          ...(person?.username === undefined ? {} : { username: person.username }),
+          bound,
+        }
+      }),
+      people: [...this.people.values()].sort((a, b) => b.at - a.at).slice(0, 20),
+      bindings: [...this.bindings.values()].map((binding) => ({
+        chatId: binding.chatId,
+        sessionId: binding.sessionId,
+        label: binding.label,
+      })),
+    }
+  }
+
+  /**
+   * Resolve one person the owner typed: a numeric id or an `@username`.
+   * `getChat` is the only Bot API call that finds a user by handle, and it only
+   * answers for users the bot has interacted with.
+   * @param query - `@name`, `name`, or a numeric Telegram user id.
+   */
+  async resolvePerson(query: string): Promise<{ id: number; name?: string; username?: string }> {
+    const text = query.trim()
+    if (text.length === 0) throw new Error('пустой запрос')
+    const lookup = this.client.getChat?.bind(this.client)
+    if (lookup === undefined) throw new Error('этот клиент Telegram не умеет искать пользователей')
+    const chat = await lookup(/^\d+$/.test(text) ? Number(text) : text)
+    const id = Number(chat.id)
+    if (!Number.isFinite(id) || id <= 0) throw new Error('Telegram вернул некорректный id')
+    const name = [chat.first_name, chat.last_name].filter(Boolean).join(' ').trim()
+    this.rememberPerson({
+      id,
+      first_name: chat.first_name,
+      last_name: chat.last_name,
+      username: chat.username,
+    })
+    return {
+      id,
+      ...(name.length > 0 ? { name } : {}),
+      ...(chat.username === undefined ? {} : { username: chat.username }),
+    }
+  }
+
+  /** Configured people, with the legacy flat list presented as entries of its own. */
+  private effectiveEntries(): TelegramUserEntry[] {
+    if (this.users.length > 0) return this.users
+    return this.allowedUserIds.map((id) => ({ id, enabled: true }))
+  }
+
+  /** Record the person behind an update (name and @username for the settings page). */
+  private rememberPerson(from: { id?: number; first_name?: string; last_name?: string; username?: string } | undefined): void {
+    if (from === undefined || typeof from.id !== 'number') return
+    const name = [from.first_name, from.last_name].filter((part) => typeof part === 'string' && part.trim().length > 0).join(' ').trim()
+    const previous = this.people.get(from.id)
+    const next: KnownPerson = {
+      id: from.id,
+      at: Date.now(),
+      ...(name.length > 0 ? { name } : previous?.name === undefined ? {} : { name: previous.name }),
+      ...(typeof from.username === 'string' && from.username.length > 0
+        ? { username: from.username }
+        : previous?.username === undefined ? {} : { username: previous.username }),
+    }
+    this.people.set(from.id, next)
+    this.saveBindings()
+  }
+
   async processUpdate(update: TelegramUpdate): Promise<void> {
     if (update.callback_query) {
       await this.handleCallback(update)
@@ -458,6 +660,7 @@ export class TelegramBridge {
       return
     }
     this.rememberChat(chatId)
+    this.rememberPerson(message.from)
 
     // Media messages: photos / image documents (optionally with a caption) are
     // admitted into the bound session; other media get an explicit notice.
@@ -601,6 +804,7 @@ export class TelegramBridge {
       return
     }
     this.rememberChat(chatId)
+    this.rememberPerson(cq.from)
     const data = cq.data ?? ''
     const picker = this.pickers.get(String(chatId))
 
@@ -1621,7 +1825,7 @@ export class TelegramBridge {
     let errorCount = 0
     while (this.polling) {
       try {
-        const updates = await this.client.getUpdates(this.offset)
+        const updates = await this.client.getUpdates(this.offset, signal)
         if (!this.polling) break
         errorCount = 0
         if (updates.length === 0) {
@@ -2712,6 +2916,10 @@ export class TelegramBridge {
         notifyPrefs: Object.fromEntries(this.notifyPrefs),
         notifyScope: Object.fromEntries(this.notifyScope),
         knownChats: [...this.knownChats],
+        // Names for the Web settings page (who wrote to the bot) and the last
+        // confirmed update offset, so a restart does not answer old updates twice.
+        people: Object.fromEntries([...this.people].map(([id, person]) => [String(id), person])),
+        ...(this.offset === undefined ? {} : { offset: this.offset }),
       }
       mkdirSync(dirname(this.bindingsPath()), { recursive: true })
       writeFileSync(this.bindingsPath(), JSON.stringify(obj, null, 2))
@@ -2730,6 +2938,8 @@ export class TelegramBridge {
         notifyPrefs?: Record<string, string>
         notifyScope?: Record<string, string>
         knownChats?: number[]
+        people?: Record<string, { id?: number; name?: string; username?: string; at?: number }>
+        offset?: number
       }
       // Legacy files (pre-renderPrefs) stored the bindings flat at the top level.
       const flat = parsed as Record<string, { chatId?: number; sessionId?: string; label?: string }>
@@ -2762,6 +2972,21 @@ export class TelegramBridge {
       }
       for (const chatId of data.knownChats ?? []) {
         if (Number.isFinite(chatId)) this.knownChats.add(Number(chatId))
+      }
+      for (const [key, person] of Object.entries(data.people ?? {})) {
+        const id = Number(person?.id ?? key)
+        if (!Number.isFinite(id) || id <= 0) continue
+        this.people.set(id, {
+          id,
+          at: typeof person?.at === 'number' && Number.isFinite(person.at) ? person.at : Date.now(),
+          ...(typeof person?.name === 'string' && person.name.length > 0 ? { name: person.name } : {}),
+          ...(typeof person?.username === 'string' && person.username.length > 0 ? { username: person.username } : {}),
+        })
+      }
+      if (typeof data.offset === 'number' && Number.isFinite(data.offset) && data.offset > 0) {
+        // Constructor-provided offset wins: a live config reload passes the
+        // offset of the bridge it replaces, which is newer than the file.
+        this.offset = this.offset ?? data.offset
       }
       if (n > 0)
         this.ctx.logger.info(`dsh-telegram-channel: restored ${n} binding(s) from disk`)

@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>dsh-telegram-channel-ru — settings page harness</title>
+<style>
+  body { font: 14px/1.5 system-ui, sans-serif; margin: 24px; max-width: 760px; color: #222; }
+  #root { border: 1px solid #ddd; border-radius: 8px; padding: 16px; }
+  #result { margin-top: 24px; font: 12px/1.6 ui-monospace, monospace; white-space: pre-wrap; }
+  .pass { color: #116611; }
+  .fail { color: #aa1111; }
+</style>
+</head>
+<body>
+<h1>Settings page harness</h1>
+<div id="root"></div>
+<pre id="result">running…</pre>
+
+<!-- Real React, UMD builds (the DSH client seeds the same library). -->
+<script src="../../node_modules/react/umd/react.development.js"></script>
+<script src="../../node_modules/react-dom/umd/react-dom.development.js"></script>
+
+<script>
+// DSH's module loader facade: capture the bundle registration instead of
+// executing it, then drive it ourselves.
+window.__ModuleLoader__ = {
+  entries: [],
+  load(entry) { this.entries.push(entry) },
+}
+</script>
+<script src="../../client/client.js"></script>
+
+<script>
+window.onerror = (message, source, line, column, error) => {
+  const block = document.getElementById('result')
+  if (!block) return
+  const row = document.createElement('div')
+  row.className = 'fail'
+  row.textContent = 'PAGE ERROR ' + message + ' @' + line + ':' + column + (error && error.stack ? '\n' + error.stack : '')
+  block.appendChild(row)
+  document.body.setAttribute('data-harness', 'crashed')
+}
+;(async () => {
+  const results = []
+  const check = (name, ok, detail) => {
+    results.push({ name, ok, detail })
+    const line = document.createElement('div')
+    line.className = ok ? 'pass' : 'fail'
+    line.textContent = (ok ? 'PASS ' : 'FAIL ') + name + (detail ? ' — ' + detail : '')
+    document.getElementById('result').appendChild(line)
+  }
+  const tick = (ms = 30) => new Promise((resolve) => setTimeout(resolve, ms))
+
+  // ── the host facts the page fetches ──
+  const INFO = {
+    ok: true,
+    running: true,
+    tokenSet: true,
+    bot: { id: 8925916772, username: 'dsh_lex1133_bot', name: 'DSH' },
+    allowAllUsers: false,
+    users: [{ id: 333041652, name: 'Алексей', username: 'danilinao', enabled: true, bound: true }],
+    people: [
+      { id: 333041652, name: 'Алексей', username: 'danilinao', at: 2 },
+      { id: 555000111, name: 'Гость', username: 'guest', at: 1 },
+    ],
+    bindings: [{ chatId: 333041652, sessionId: 's-1', label: 'демо' }],
+  }
+  const RESOLVED = { ok: true, user: { id: 777000888, name: 'Мама', username: 'mama' } }
+  const requests = []
+  window.fetch = async (url, init = {}) => {
+    requests.push({ url: String(url), method: init.method || 'GET', body: init.body })
+    if (String(url).endsWith('/settings/info')) return { ok: true, status: 200, json: async () => INFO }
+    if (String(url).endsWith('/settings/resolve')) return { ok: true, status: 200, json: async () => RESOLVED }
+    return { ok: false, status: 404, json: async () => ({ ok: false, error: 'not found' }) }
+  }
+
+  // ── a settings scope over a document the host would serve ──
+  const documentValue = {
+    users: [{ id: 333041652, name: 'Алексей', enabled: true }],
+    allowedUserIds: [333041652],
+    allowAllUsers: false,
+    maxMessageLength: 4096,
+    pollingTimeoutSec: 30,
+    rendering: 'html',
+  }
+  // The real ConfigFormController returns a STABLE snapshot reference between
+  // changes, which useSyncExternalStore requires; mirror that here.
+  const listeners = new Set()
+  let revision = 3
+  const snapshotFor = () => ({
+    status: 'ready',
+    value: documentValue,
+    user: { users: documentValue.users, allowedUserIds: [333041652] },
+    base: undefined,
+    revision,
+    writable: true,
+    mode: 'host',
+  })
+  let snapshot = snapshotFor()
+  const publish = () => {
+    revision += 1
+    snapshot = snapshotFor()
+    for (const listener of listeners) listener()
+  }
+  const scope = {
+    getSnapshot: () => snapshot,
+    subscribe(listener) {
+      listeners.add(listener)
+      return () => listeners.delete(listener)
+    },
+    mutate: async (ops) => {
+      requests.push({ url: 'mutate', method: 'MUTATE', body: JSON.stringify(ops) })
+      // Simulate the host folding the accepted write back into the document.
+      for (const op of ops) {
+        if (op.op === 'set') documentValue[op.path[0]] = op.value
+        if (op.op === 'unset') delete documentValue[op.path[0]]
+      }
+      publish()
+      return true
+    },
+    set: async () => true,
+    unset: async () => true,
+  }
+
+  // ── the browser-side Cordis context ──
+  const dictionaries = {}
+  let registration = null
+  const ctx = {
+    effect(fn) { fn(); return () => {} },
+    inject(_deps, callback) { callback(ctx) },
+    locale: {
+      register(ns, dicts) { dictionaries[ns] = dicts; return () => {} },
+    },
+    slots: {
+      inject(_slot, callback) { callback() },
+      register(_entry, component) { registration = { entry: _entry, component }; return () => {} },
+    },
+    configForms: { get: () => scope },
+  }
+
+  const entry = window.__ModuleLoader__.entries[0]
+  const plugin = entry.factory((specifier) => {
+    if (specifier === 'react') return window.React
+    throw new Error('unexpected require: ' + specifier)
+  })
+  plugin.apply(ctx)
+
+  check('bundle registered under the package name', entry.id === 'dsh-telegram-channel-ru', entry.id)
+  check('form registered into plugins.bundle.config', !!registration && registration.entry.key === 'dsh-telegram-channel-ru')
+
+  const dict = dictionaries.telegramChannelRu.ru
+  const t = (key, params) => {
+    let text = dict[key] !== undefined ? dict[key] : key
+    if (params) for (const [name, value] of Object.entries(params)) text = text.split('{' + name + '}').join(String(value))
+    return text
+  }
+
+  const container = document.getElementById('root')
+  const root = window.ReactDOM.createRoot(container)
+  root.render(window.React.createElement(registration.component, { view: 'page', t }))
+  await tick(120)
+
+  const text = () => container.textContent
+  const $ = (selector) => container.querySelector(selector)
+  const setValue = (node, value) => {
+    const descriptor = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')
+    descriptor.set.call(node, value)
+    node.dispatchEvent(new window.Event('input', { bubbles: true }))
+  }
+  const click = (node) => node.dispatchEvent(new window.MouseEvent('click', { bubbles: true }))
+
+  check('token field rendered write-only', $('input#tgch-token') !== null && $('input#tgch-token').type === 'password')
+  check('token marked as saved', text().includes('сохранён'))
+  check('connected status shows the bot handle', text().includes('@dsh_lex1133_bot'))
+  check('existing user listed with its label', text().includes('Алексей') && text().includes('333041652'))
+  check('recent stranger offered as a chip', text().includes('Гость'))
+  check('save is disabled until something changes', $('button#tgch-save').disabled === true)
+
+  // ── add a user by @username ──
+  setValue($('input#tgch-add-query'), '@mama')
+  await tick()
+  click($('button#tgch-add'))
+  await tick(120)
+  const resolveCall = requests.find((request) => request.url.endsWith('/settings/resolve'))
+  check('resolving @username called the host route', !!resolveCall && JSON.parse(resolveCall.body).query === '@mama')
+  check('resolved person appeared in the list', text().includes('777000888'))
+
+  // ── toggle the new user off and save ──
+  const toggles = container.querySelectorAll('.tgch-row input[type="checkbox"]')
+  click(toggles[toggles.length - 1])
+  await tick()
+  setValue($('input#tgch-token'), '999:new-token')
+  await tick()
+  click($('button#tgch-save'))
+  await tick(160)
+  const mutation = requests.find((request) => request.method === 'MUTATE')
+  check('save sent one atomic mutation', !!mutation)
+  let ops = []
+  try { ops = JSON.parse(mutation.body) } catch { ops = [] }
+  const opOf = (path) => ops.find((op) => Array.isArray(op.path) && op.path.join('.') === path)
+  check('token written only because it was typed', opOf('token') !== undefined && opOf('token').value === '999:new-token')
+  check('users written as an entry list', opOf('users') !== undefined && Array.isArray(opOf('users').value) && opOf('users').value.length === 2)
+  check('new user saved as disabled', opOf('users') !== undefined && opOf('users').value.some((user) => user.id === 777000888 && user.enabled === false))
+  check('legacy flat list cleared in the same write', opOf('allowedUserIds') !== undefined && opOf('allowedUserIds').op === 'unset')
+  check('unchanged fields are not restated', opOf('rendering') === undefined && opOf('maxMessageLength') === undefined)
+  check('saved message shown', text().includes('Сохранено'))
+
+  // ── remove the last user, check the count follows ──
+  const removeButtons = [...container.querySelectorAll('.tgch-row button')]
+  click(removeButtons[removeButtons.length - 1])
+  await tick()
+  check('removing a user drops it from the list', !text().includes('777000888'))
+
+  // ── allow-all warning appears with the toggle ──
+  click($('input#tgch-allow-all'))
+  await tick()
+  check('allow-everyone warning is shown', text().includes('Опасно'))
+
+  const failed = results.filter((result) => !result.ok)
+  document.title = failed.length === 0 ? 'HARNESS OK' : 'HARNESS FAILED'
+  const summary = document.createElement('div')
+  summary.className = failed.length === 0 ? 'pass' : 'fail'
+  summary.textContent = `\n${results.length - failed.length}/${results.length} checks passed`
+  document.getElementById('result').appendChild(summary)
+  document.body.setAttribute('data-harness', failed.length === 0 ? 'ok' : 'failed')
+})().catch((error) => {
+  const line = document.createElement('div')
+  line.className = 'fail'
+  line.textContent = 'HARNESS CRASH ' + (error && error.stack ? error.stack : String(error))
+  document.getElementById('result').appendChild(line)
+  document.body.setAttribute('data-harness', 'crashed')
+})
+</script>
+</body>
+</html>

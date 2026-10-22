@@ -22,6 +22,10 @@ Telegram-пульт для **DeepSeek Harness**: телефон подключа
 
 ## Что умеет
 
+- **Настройки в Web-интерфейсе.** Токен, список пользователей, доступ и формат
+  сообщений правятся на карточке плагина (**Plugins → dsh-telegram-channel-ru**),
+  без перезапуска `dsh` и без ручной правки YAML. Несколько человек в белом
+  списке, добавление по `@username` и по id.
 - **Пульт к живой сессии.** `/sessions` → рабочая область → сессия → привязка.
   Дальше всё, что вы пишете в Telegram, попадает в эту же сессию; ответы и работа
   инструментов видны и на компьютере.
@@ -120,6 +124,63 @@ systemctl restart dsh
 | `maxMessageLength` | по умолчанию 4096 |
 | `pollingTimeoutSec` | по умолчанию 30 |
 | `rendering` | `html` (по умолчанию, любой клиент) или `rich` |
+| `users` | список людей из GUI: `id`, подпись (`name`), `enabled`; главнее плоского списка |
+
+## Настройки в Web-интерфейсе
+
+Всё, что раньше правили руками в `cordis.patch.yml`, теперь есть в GUI:
+**Plugins → dsh-telegram-channel-ru** (боковая панель). Страница настроек живёт
+на карточке плагина — между описанием и списком строк.
+
+- **Токен бота** — поле «только для записи»: DSH не отдаёт секрет в браузер
+  (`.role('secret')`), поэтому страница показывает лишь «сохранён» и строку
+  статуса «Бот подключён: @имя». Пустое поле = «оставить как есть», кнопка
+  «Проверить» заново спрашивает Telegram (`getMe`).
+- **Пользователи** — несколько человек сразу: id, подпись, галочка «Отвечать».
+  Добавление по числовому id или по `@username` (бот резолвит его через
+  `getChat`), плюс чипсы «недавно писали боту» — один клик на того, кто уже
+  постучался. Снятая галочка оставляет человека в списке, но бот не отвечает.
+- **Доступ** — «Разрешить всем» (опасно, только для отладки).
+- **Оформление** — `html` / `rich`.
+- **Дополнительно** — максимальная длина сообщения и таймаут long-poll.
+
+Сохранение — одна атомарная запись в профиль: страница отправляет только
+изменённые поля, поэтому токен не переписывается заново при каждой правке.
+**Перезапуск `dsh` не нужен:** плагин слушает `loader/volatile-update`,
+останавливает старый мост и поднимает новый с новыми значениями; смещение
+`getUpdates` при этом сохраняется, так что уже обработанные сообщения не
+обрабатываются дважды.
+
+То же самое в `cordis.patch.yml` (страница пишет именно это):
+
+```yaml
+- id: dsh-telegram-channel-ru
+  name: dsh-telegram-channel-ru
+  config:
+    token: "<токен>"
+    users:
+      - id: 333041652
+        name: Алексей
+        enabled: true
+      - id: 777000888
+        enabled: false
+    allowAllUsers: false
+    rendering: html
+```
+
+`allowedUserIds` (плоский список из 0.8.x) продолжает работать — он читается,
+пока `users` пуст. Первое сохранение из GUI пишет `users` и убирает
+`allowedUserIds`, чтобы не осталось второго, невидимого белого списка.
+
+> **Важно про несколько человек.** Бот не разделяет доступ к сессиям: каждый из
+> списка видит все рабочие области и может привязаться к любой сессии — ровно
+> так, как это делал единственный владелец. Если это не подходит, добавляйте
+> людей точечно и держите `allowAllUsers` выключенным.
+
+Страница берёт с хоста только несекретные сведения (`getMe`, имена из
+`getChat`) через два маршрута под `/plugins/dsh-telegram-channel-ru/settings/`
+(`info` и `resolve`); токен по ним не ходит. Нужен DSH 0.2.x: в 0.1.x у Plugins
+нет форм, и раздел просто не появится.
 
 ## Команды
 
@@ -302,9 +363,42 @@ duplicate and the loader would reject it):
 | `maxMessageLength` | — | outgoing message chunk size, default 4096 |
 | `pollingTimeoutSec` | — | long-poll timeout, default 30 |
 | `rendering` | — | `html` (default, works in every client) or `rich` (Telegram native rich messages) |
+| `users` | — | list of people edited in the GUI: `id`, optional `name`, `enabled`; wins over the flat list |
 
 `name` is required on an id-targeted row: without it the plugin manager cannot map
 the row back to its loader entry and the settings form becomes read-only.
+
+### Settings in the Web UI
+
+Open **Plugins → dsh-telegram-channel-ru** in the sidebar: the plugin card carries
+the same settings as a page, so no YAML editing and no `systemctl restart dsh`.
+
+- **Bot token** — write-only. DSH strips `.role('secret')` fields from the settings
+  document, so the page only shows "saved" plus a live status line ("Connected as
+  @bot"); leaving the field empty keeps the current token. **Check** asks Telegram
+  again (`getMe`).
+- **Users** — several people with an id, an optional label and an "Answers" toggle.
+  Add by numeric id or by `@username` (resolved server-side through `getChat`), or
+  click one of the "recently wrote to the bot" chips. A muted user stays listed but
+  is refused by the bot.
+- **Access** — "Allow everyone" (dangerous, debugging only).
+- **Appearance** — `html` / `rich`.
+- **Advanced** — maximum message length and the long-poll timeout.
+
+Saving is one atomic profile write that restates only the changed fields, so the
+token is not rewritten on every edit. The plugin listens for
+`loader/volatile-update`, stops the old bridge and starts a new one with the new
+values — carrying the `getUpdates` offset over, so nothing is answered twice.
+
+The page reads only non-secret facts from the host (`getMe`, names from `getChat`)
+through two routes under `/plugins/dsh-telegram-channel-ru/settings/` (`info`,
+`resolve`); the token never travels through them. This needs DSH 0.2.x — 0.1.x has
+no settings forms, and the section simply does not appear.
+
+**Everyone in the list shares the sessions.** The bot does not separate access
+between users: each allowlisted person sees every workspace and may attach to any
+session, exactly as the single owner could. Add people deliberately and keep
+`allowAllUsers` off.
 
 ## Commands
 

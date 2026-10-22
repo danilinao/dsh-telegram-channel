@@ -22,11 +22,34 @@ npm; ответвление `hi-wenw/dsh-telegram-channel`, репозитори
 - **`src/` — источник истины, `lib/` — результат сборки.** DSH исполняет
   `lib/index.js`, поэтому после правки `src/` обязательно `npm run build` (или
   `npm run check` целиком). `lib/` коммитится — клон без сборки тоже работает.
-- `npm test` — 62 теста по `src/`; `npm run test:lib` проверяет, что `lib/`
+- `npm test` — 99 тестов по `src/`; `npm run test:lib` проверяет, что `lib/`
   собран из текущего `src/`; `npm run check` = typecheck → build → тесты.
+- **`client/client.js` — браузерная половина (страница настроек), без сборки.**
+  Это классический скрипт для `window.__ModuleLoader__`, его не трогает `tsc`;
+  правится и коммитится как есть. `npm run test:browser` рендерит его с
+  настоящим React в headless Chrome (в `npm run check` не входит).
+- Подробно — [BUILD.md](BUILD.md).
+
+## Страница настроек в Web (контракт DSH 0.2)
+
+- Поля Config помечены `.volatile()` — иначе DSH не строит форму, а запись
+  отклоняется (`isVolatilePath`). Плагин получает их как боксы (`Volatile`) и
+  читает через `readVolatile` (`src/config.ts`).
+- `token` помечен `.role('secret')`: DSH вырезает его из документа настроек,
+  поэтому страница показывает только «сохранён» + `getMe`-статус.
+- Форма регистрируется в слот `plugins.bundle.config` с ключом, равным **имени
+  пакета** (у нас `id` строки в профиле совпадает с именем пакета).
+- Сохранение = `scope.mutate(ops)` (атомарно, только изменённые поля). Плагин
+  ловит `loader/volatile-update`, останавливает мост (`AbortSignal` в
+  `getUpdates`!) и поднимает новый; смещение `getUpdates` переносят, при смене
+  токена — сбрасывают.
+- Несекретные факты (кто владелец токена, имена из `getChat`, кто писал боту)
+  отдаются двумя маршрутами `/plugins/dsh-telegram-channel-ru/settings/{info,resolve}`
+  (`src/settings-api.ts`); токен по ним не ходит.
+- Не добавлять в клиент импорты пакетов Harness: только `require('react')`
+  (иначе нужен `dsh.client.external` и сборка бандла).
 - В `lib/` не должно быть китайских литералов (наследие upstream): они ловятся
   `test:lib`, но лучше сразу переводить строки в `src/commands.ts`.
-- Подробно — [BUILD.md](BUILD.md).
 
 ## Работа с живым DSH
 

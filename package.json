@@ -1,6 +1,6 @@
 {
   "name": "dsh-telegram-channel-ru",
-  "version": "0.8.3",
+  "version": "0.9.0",
   "description": "Telegram-пульт для DeepSeek Harness: живая Web-сессия на телефоне — русский интерфейс, архивные сессии скрыты, имя сессии на кнопке",
   "keywords": [
     "telegram",
@@ -42,10 +42,12 @@
       "types": "./lib/index.d.ts",
       "default": "./lib/index.js"
     },
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./client": "./client/client.js"
   },
   "files": [
     "lib",
+    "client",
     "src",
     "scripts",
     "cordis.patch.yml",
@@ -59,6 +61,13 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-locale"
+      ]
     }
   },
   "scripts": {
@@ -69,7 +78,8 @@
     "test:native": "node --test tests/",
     "check": "npm run typecheck && npm run build && npm test && npm run test:lib",
     "prepublishOnly": "npm run clean && npm run build && npm test && npm run test:lib",
-    "test:lib": "node --import tsx --test tests/lib/*.test.ts"
+    "test:lib": "node --import tsx --test tests/lib/*.test.ts",
+    "test:browser": "node tests/browser/run.mjs"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.5-alpha.1",
@@ -85,6 +95,8 @@
     "@deepseek-ai/dsh-session": "0.2.1-alpha.2",
     "@deepseek-ai/schemastery": "3.18.5-alpha.1",
     "@types/node": "^26.6.5",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
     "tsx": "^4.23.15",
     "typescript": "^5.9.0"
   },

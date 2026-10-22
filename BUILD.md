@@ -9,7 +9,9 @@
 |---|---|
 | `src/*.ts` | **источник истины**, правим только здесь |
 | `lib/*.js`, `lib/*.d.ts` | результат `npm run build` (tsc); DSH грузит `main: lib/index.js` |
+| `client/client.js` | **браузерная половина** страницы настроек: классический скрипт для `window.__ModuleLoader__`, без сборки — правим и коммитим как есть |
 | `tests/` | `node:test` по исходникам (`src/`), плюс `tests/lib/` — проверка свежести сборки |
+| `tests/browser/` | ручная проверка страницы в headless Chrome (`npm run test:browser`), вне `npm run check` |
 | `tsconfig.json` | `target ES2022`, `module NodeNext`, `strict`, `rootDir src`, `outDir lib` |
 
 `lib/` коммитится в git намеренно: DSH подключает плагин как `link:`-зависимость
@@ -44,10 +46,26 @@ npm run typecheck    # только проверка типов, без запи
 ## Проверки
 
 ```bash
-npm test             # 62 теста по src/ (tsx + node:test)
-npm run test:lib     # 2 теста: lib/ собран из текущего src/ (паритет и тексты)
+npm test             # 99 тестов по src/ (tsx + node:test)
+npm run test:lib     # 3 теста: lib/ собран из текущего src/ (паритет и тексты)
 npm run check        # typecheck → build → test → test:lib (то, что гоняем перед коммитом)
+npm run test:browser # страница настроек в headless Chrome: настоящий React, 19 проверок
 ```
+
+`test:browser` рендерит `client/client.js` с настоящим React (devDependencies,
+UMD-сборки из `node_modules/react/umd`) в `google-chrome --headless` и проходит
+страницу как человек: статус, добавление по `@username`, снятие галочки,
+сохранение (проверяются сами ops — что пишется только изменённое и что старый
+`allowedUserIds` убирается), удаление, предупреждение «разрешить всем». Без
+Chrome или без `node_modules/react/umd` скрипт выходит с кодом 0 и пишет
+«skipped», поэтому в `npm run check` он не входит. `CHROME_PATH` задаёт браузер
+явно.
+
+Проверки браузерной половины без Chrome: `tests/client-bundle.test.ts` грузит
+`client/client.js` через поддельный `window.__ModuleLoader__` и проверяет, что
+бандл регистрируется под именем пакета, кладёт форму в слот
+`plugins.bundle.config` с ключом `dsh-telegram-channel-ru` и берёт настройки из
+`ctx.configForms.get('dsh-telegram-channel-ru')`.
 
 Тесты не требуют ни бота, ни сети: Telegram-клиент замокан, а каталог
 изолирован через `DSH_HOME` (иначе в тесты протекают реальные сессии хоста) и
@@ -60,7 +78,7 @@ npm pack             # собрать tarball, проверить состав �
 npm pack --dry-run   # только список файлов
 ```
 
-В пакет попадают `lib/`, `src/`, `scripts/`, `cordis.patch.yml`, `README.md`,
+В пакет попадают `lib/`, `client/`, `src/`, `scripts/`, `cordis.patch.yml`, `README.md`,
 `UPSTREAM.md`, `BUILD.md`, `LICENSE` (поле `files`). `prepublishOnly` делает
 `clean → build → test → test:lib`, поэтому опубликовать несобранный пакет
 нельзя.

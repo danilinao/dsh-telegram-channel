@@ -10,6 +10,11 @@ export interface TelegramChat {
     title?: string;
     username?: string;
 }
+/** `getChat` result for a private chat: the user's display fields ride on the chat. */
+export interface TelegramChatInfo extends TelegramChat {
+    first_name?: string;
+    last_name?: string;
+}
 export interface TelegramPhotoSize {
     file_id: string;
     file_unique_id: string;
@@ -76,7 +81,9 @@ export interface TelegramClientOptions {
 }
 export interface TelegramClientLike {
     getMe(): Promise<TelegramUser>;
-    getUpdates(offset?: number): Promise<TelegramUpdate[]>;
+    /** `getChat` — resolves an id or `@username`; optional so partial mocks still satisfy the type. */
+    getChat?(chatId: number | string): Promise<TelegramChatInfo>;
+    getUpdates(offset?: number, signal?: AbortSignal): Promise<TelegramUpdate[]>;
     sendMessage(chatId: number, text: string, parseMode?: string, replyMarkup?: InlineKeyboardMarkup): Promise<TelegramMessage>;
     sendRichMessage(chatId: number, markdown: string): Promise<TelegramMessage>;
     sendChatAction(chatId: number, action: string): Promise<boolean>;
@@ -100,7 +107,8 @@ export declare class TelegramClient implements TelegramClientLike {
     private redact;
     private call;
     getMe(): Promise<TelegramUser>;
-    getUpdates(offset?: number): Promise<TelegramUpdate[]>;
+    getChat(chatId: number | string): Promise<TelegramChatInfo>;
+    getUpdates(offset?: number, signal?: AbortSignal): Promise<TelegramUpdate[]>;
     sendMessage(chatId: number, text: string, parseMode?: string, replyMarkup?: InlineKeyboardMarkup): Promise<TelegramMessage>;
     sendRichMessage(chatId: number, markdown: string): Promise<TelegramMessage>;
     sendChatAction(chatId: number, action: string): Promise<boolean>;
