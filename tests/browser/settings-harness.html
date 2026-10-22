@@ -124,16 +124,29 @@ window.onerror = (message, source, line, column, error) => {
 
   // ── the browser-side Cordis context ──
   const dictionaries = {}
-  let registration = null
+  const registrations = []
+  let activeLocale = 'ru'
   const ctx = {
     effect(fn) { fn(); return () => {} },
     inject(_deps, callback) { callback(ctx) },
     locale: {
       register(ns, dicts) { dictionaries[ns] = dicts; return () => {} },
+      // The section label thunk reads through this, so it follows the active locale.
+      bind(ns) {
+        return (key, params) => {
+          const dict = (dictionaries[ns] || {})[activeLocale] || {}
+          let text = dict[key] !== undefined ? dict[key] : key
+          if (params) for (const [name, value] of Object.entries(params)) text = text.split('{' + name + '}').join(String(value))
+          return text
+        }
+      },
     },
     slots: {
       inject(_slot, callback) { callback() },
-      register(_entry, component) { registration = { entry: _entry, component }; return () => {} },
+      register(entryArg, component) {
+        registrations.push({ entry: entryArg, component })
+        return () => {}
+      },
     },
     configForms: { get: () => scope },
   }
@@ -146,7 +159,19 @@ window.onerror = (message, source, line, column, error) => {
   plugin.apply(ctx)
 
   check('bundle registered under the package name', entry.id === 'dsh-telegram-channel-ru', entry.id)
-  check('form registered into plugins.bundle.config', !!registration && registration.entry.key === 'dsh-telegram-channel-ru')
+  const bySlot = (name) => registrations.find((item) => item.entry.name === name)
+  const section = bySlot('settings.section')
+  check(
+    'form registered into plugins.bundle.config',
+    !!bySlot('plugins.bundle.config') && bySlot('plugins.bundle.config').entry.key === 'dsh-telegram-channel-ru',
+  )
+  check(
+    'settings tab registered as a settings.section entry',
+    !!section && section.entry.id === 'dsh-telegram-channel-ru' && typeof section.entry.order === 'number',
+  )
+  check('settings tab label is localized, not hardcoded', typeof section.entry.label === 'function')
+  check('settings tab label follows the active locale', section.entry.label() === 'Telegram', section.entry.label())
+  check('settings tab carries a locale namespace for its `t`', section.entry.locale === 'telegramChannelRu')
 
   const dict = dictionaries.telegramChannelRu.ru
   const t = (key, params) => {
@@ -157,7 +182,9 @@ window.onerror = (message, source, line, column, error) => {
 
   const container = document.getElementById('root')
   const root = window.ReactDOM.createRoot(container)
-  root.render(window.React.createElement(registration.component, { view: 'page', t }))
+  // Render the SETTINGS TAB (not the Plugins card): that is the page the owner
+  // now opens, so every behaviour below is proved through it.
+  root.render(window.React.createElement(section.component, { view: 'page', t }))
   await tick(120)
 
   const text = () => container.textContent

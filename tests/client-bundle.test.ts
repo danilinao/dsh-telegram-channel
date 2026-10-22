@@ -71,13 +71,20 @@ function fakeContext() {
         locales.push({ ns, dicts })
         return () => {}
       },
+      // The settings-section label is a thunk read through this binding.
+      bind(ns: string) {
+        return (key: string) => {
+          const dict = locales.find((item) => item.ns === ns)?.dicts.ru ?? {}
+          return dict[key] ?? key
+        }
+      },
     },
     slots: {
       inject(slot: string, callback: () => void) {
         callback()
       },
       register(registration: Record<string, unknown>) {
-        slots.push({ slot: 'plugins.bundle.config', registration })
+        slots.push({ slot: String(registration.name), registration })
         return () => {}
       },
     },
@@ -108,7 +115,7 @@ function fakeContext() {
   return { ctx, locales, styles, slots, scopes, documentStub }
 }
 
-test('apply registers the RU/EN dictionaries, the styles and one form slot', () => {
+test('apply registers the RU/EN dictionaries, the styles and both form slots', () => {
   const plugin = loadPlugin()
   assert.deepEqual(plugin.inject, ['slots', 'locale'])
   const { ctx, locales, styles, slots, scopes, documentStub } = fakeContext()
@@ -126,15 +133,27 @@ test('apply registers the RU/EN dictionaries, the styles and one form slot', () 
   assert.equal(styles.length, 1)
   assert.match(styles[0], /\.tgch-root/)
 
-  // The form is registered into the bundle-config slot, keyed by the package
-  // name — the key the Plugins page dispatches when the card is opened.
-  assert.equal(slots.length, 1)
-  assert.deepEqual(slots[0].registration, {
+  // Two doors, one scope: the Settings tab (the page the owner opens) and the
+  // Plugins card (where DSH's inventory links configuration from).
+  assert.equal(slots.length, 2)
+  const bySlot = (name: string) => slots.find((item) => item.slot === name)!
+  const tab = bySlot('settings.section')
+  assert.ok(tab, 'settings.section registration is missing')
+  assert.equal(tab.registration.id, 'dsh-telegram-channel-ru')
+  assert.equal(typeof tab.registration.order, 'number')
+  assert.equal(tab.registration.locale, 'telegramChannelRu')
+  // A thunk label, so the nav row follows the active locale without re-registering.
+  const label = tab.registration.label as () => string
+  assert.equal(typeof label, 'function')
+  assert.equal(label(), 'Telegram')
+
+  assert.deepEqual(bySlot('plugins.bundle.config').registration, {
     name: 'plugins.bundle.config',
     key: 'dsh-telegram-channel-ru',
     locale: 'telegramChannelRu',
   })
-  // The form edits the loader entry with the same id (id == package name here).
+  // The form edits the loader entry with the same id (id == package name here),
+  // and both registrations share the one resolved scope.
   assert.deepEqual(scopes, ['dsh-telegram-channel-ru'])
 })
 

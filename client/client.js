@@ -45,6 +45,10 @@ window.__ModuleLoader__.load({
     const RESOLVE_URL = '/plugins/dsh-telegram-channel-ru/settings/resolve'
 
     const ru = {
+      // `tabLabel` — строка навигации в «Настройках»; заголовок страницы — ниже.
+      tabLabel: 'Telegram',
+      pageTitle: 'Telegram-пульт',
+      pageHint: 'Телефон подключается к этой же сессии — один контекст, две стороны.',
       token: 'Токен бота',
       tokenSet: 'сохранён',
       tokenMissing: 'не задан',
@@ -102,6 +106,10 @@ window.__ModuleLoader__.load({
     }
 
     const en = {
+      // `tabLabel` is the Settings navigation row; the page adds its own heading.
+      tabLabel: 'Telegram',
+      pageTitle: 'Telegram remote',
+      pageHint: 'Your phone joins this very session — one context, two sides.',
       token: 'Bot token',
       tokenSet: 'saved',
       tokenMissing: 'not set',
@@ -166,6 +174,8 @@ window.__ModuleLoader__.load({
      */
     const CSS = [
       '.tgch-root{display:flex;flex-direction:column;gap:18px;padding:4px 0 8px}',
+      '.tgch-page-title{margin:0;font-size:16px;font-weight:600;line-height:1.4;color:var(--dsw-alias-label-primary)}',
+      '.tgch-page-hint{margin:-10px 0 0;font-size:12.5px;line-height:1.5;color:var(--dsw-alias-label-tertiary)}',
       '.tgch-status{display:flex;align-items:center;gap:8px;padding:10px 12px;border:0.5px solid var(--dsw-alias-border-l4);border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-layer-3)}',
       '.tgch-dot{width:8px;height:8px;border-radius:50%;flex:none;background:var(--dsw-alias-label-tertiary)}',
       '.tgch-status[data-state="ok"] .tgch-dot{background:var(--dsw-alias-state-success-primary, #2f9e44)}',
@@ -460,6 +470,11 @@ window.__ModuleLoader__.load({
         return h(
           'div',
           { className: 'tgch-root' },
+          // ── page heading ──
+          // The Plugins page card supplies its own header; a Settings section has
+          // none, so the page names itself and says what it is.
+          h('h2', { className: 'tgch-page-title' }, t('pageTitle')),
+          h('p', { className: 'tgch-page-hint' }, t('pageHint')),
           // ── live status ──
           h(
             'div',
@@ -783,6 +798,26 @@ window.__ModuleLoader__.load({
         // a form that could not save.
         ctx.inject(['configForms'], (forms) => {
           const scope = forms.configForms.get(ENTRY_ID)
+          // Settings → Telegram: the page the owner opens to configure the bot.
+          // A list slot: `id` keys the entry, `order` places the nav row, and a
+          // thunk label is re-read per render so it follows the active locale
+          // without re-registering (slots contract, `SlotLabel`).
+          const t = ctx.locale.bind(LOCALE_NS)
+          ctx.slots.inject('settings.section', () =>
+            ctx.slots.register(
+              {
+                name: 'settings.section',
+                id: ENTRY_ID,
+                order: 40,
+                label: () => t('tabLabel'),
+                locale: LOCALE_NS,
+              },
+              formFor(scope),
+            ),
+          )
+          // The Plugins page card stays as a second door to the same scope: DSH's
+          // plugin inventory links configuration from there, and both render the
+          // same component over the same `configForms` scope, so they cannot drift.
           ctx.slots.inject('plugins.bundle.config', () =>
             ctx.slots.register(
               { name: 'plugins.bundle.config', key: ENTRY_ID, locale: LOCALE_NS },
