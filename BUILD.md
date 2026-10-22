@@ -105,6 +105,7 @@ dsh plugin --profile web allow-version dsh-telegram-channel-ru@<версия> \
 npm version minor --no-git-tag-version   # или major/patch — поднимает версию
 npm run check                            # всё зелёное
 git commit -am "release: vX.Y.Z"
+git tag vX.Y.Z
 ./PUBLISH.sh                             # GitHub: push main + теги (токен из хранилища DSH)
 ```
 Толчок тега `vX.Y.Z` запускает GitHub Actions и **публикацию в npm** (см. ниже).
@@ -119,12 +120,19 @@ git commit -am "release: vX.Y.Z"
 Publishing** (OIDC): в `package.json` нет токенов, в настройках репозитория нет
 секретов — npm выдаёт короткоживущий токен за доверие к конкретному workflow
 этого репозитория (`npm trust github`, он же Trusted Publisher на сайте).
-Provenance (`--provenance`) при этом прикрепляется автоматически, поэтому у
-версии на npm виден провенанс-бейдж и связь с коммитом.
+Provenance (`--provenance`) прикрепляется автоматически, и версия на npm
+получает провенанс-аттестацию: видно, из какого коммита и какого workflow она
+собрана.
 
 ```bash
 git tag v0.9.0 && git push origin v0.9.0   # → Actions: npm ci, npm run check, npm publish
 ```
+
+Первый прогон — `v0.8.2` (2026-10-22), `conclusion: success`, в логе
+`publish Signed provenance statement with source and build information from
+GitHub Actions`; версия стала публичной примерно через полторы минуты
+(`Your package is being processed and may take a few minutes to become
+available` — это нормально, повторно публиковать не надо).
 
 Доверие привязано к паре «репозиторий + файл workflow» —
 `danilinao/dsh-telegram-channel-ru` + `publish.yml`. **Переименование репозитория
@@ -135,12 +143,19 @@ git tag v0.9.0 && git push origin v0.9.0   # → Actions: npm ci, npm run check,
 Workflow идемпотентен: если версия из `package.json` уже есть в реестре, шаг
 публикации пропускается, а при расхождении тега и версии сборка падает.
 
-Состояние доверия:
+Состояние доверия (нужна 2FA-сессия; granular-токену с bypass 2FA оба запроса
+отвечают 403, поэтому `trust list` из скрипта часто не читается):
 
 ```bash
 npm trust list dsh-telegram-channel-ru       # что настроено
 npm trust revoke dsh-telegram-channel-ru --id=<id>
 ```
+
+Ещё одна грабля токена: **пуш изменений в `.github/workflows/*` требует scope
+`workflow`** (fine-grained: `Workflows: Read and write`, classic: `workflow`).
+Без него `git push` отвечает `refusing to allow a Personal Access Token to create
+or update workflow .github/workflows/publish.yml without workflow scope` — сам
+файл при этом уже в коммите, достаточно расширить scope и повторить `./PUBLISH.sh`.
 
 Правка доверия требует 2FA и сессии npm (granular-токен с bypass 2FA для
 `npm trust` не годится) — это делает владелец аккаунта на

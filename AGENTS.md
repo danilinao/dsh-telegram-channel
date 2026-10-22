@@ -53,14 +53,16 @@ npm; ответвление `hi-wenw/dsh-telegram-channel`, репозитори
   `git push origin main --tags` (или `./PUBLISH.sh`, он берёт токен из хранилища
   DSH) → GitHub Release с описанием из `CHANGELOG.md`.
 - npm-публикация: пакет `dsh-telegram-channel-ru` на npm (владелец
-  `lex1133`). **Основной путь — CI без токенов:** толчок тега `v*` запускает
-  `.github/workflows/publish.yml` (Trusted Publishing по OIDC, `--provenance`).
-  Доверие к workflow настраивается один раз владельцем через `npm trust github`
-  или страницу пакета на npmjs.com (требует 2FA и сессии — granular-токен не
-  подходит). Запасной путь — `./PUBLISH-npm.sh` с токеном `NPM_TOKEN` из
-  `~/.dsh/.credentials.yaml` (`--dry-run` — только состав). Загвоздки ручной
-  публикации (staged publishing, заглушка `0.0.0-stage`, «cannot publish over»)
-  разобраны в [BUILD.md](BUILD.md).
+  `lex1133`). **Основной путь — CI без токенов и работает:** толчок тега `v*`
+  запускает `.github/workflows/publish.yml` (Trusted Publishing по OIDC,
+  `--provenance`); первый прогон — `v0.8.2`, success, provenance ушла в
+  sigstore. Доверие привязано к `danilinao/dsh-telegram-channel-ru` +
+  `publish.yml` (настраивается владельцем через `npm trust github` или страницу
+  пакета — granular-токену оба запроса отвечают 403). Пуш правок в
+  `.github/workflows/*` требует scope `workflow` у `GITHUB_TOKEN`. Запасной
+  путь — `./PUBLISH-npm.sh` с токеном `NPM_TOKEN` (`--dry-run` — только
+  состав). Загвоздки ручной публикации (staged publishing, заглушка
+  `0.0.0-stage`, «cannot publish over») — в [BUILD.md](BUILD.md).
 
 ## Секреты
 
