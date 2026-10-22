@@ -2,7 +2,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import Schema from '@deepseek-ai/schemastery'
 import { TelegramBridge } from './bridge.js'
 
-export const name = 'dsh-telegram-channel'
+export const name = 'dsh-telegram-channel-ru'
 /** agents: followup; apiProxy and userQuestions are optional runtime services. */
 export const inject = ['agents']
 

@@ -1,5 +1,5 @@
-url: https://github.com/danilinao/dsh-telegram-channel
-name: danilinao/dsh-telegram-channel
+url: https://github.com/danilinao/dsh-telegram-channel-ru
+name: danilinao/dsh-telegram-channel-ru
 category: remote
 description:
   en: "Telegram remote for DeepSeek Harness: attach a live web session from your phone and answer its questions there, with a Russian UI."

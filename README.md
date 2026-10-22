@@ -1,12 +1,18 @@
-# dsh-telegram-channel
+# dsh-telegram-channel-ru
 
 > **Русский клон [hi-wenw/dsh-telegram-channel](https://github.com/hi-wenw/dsh-telegram-channel)
 > с доработками.** Взята база `0.3.5` (коммит `7af6cef`) и добавлено: полностью
 > русский интерфейс, скрытие архивных сессий в меню выбора, наименование сессии на
 > кнопке, чтение каталога через хост-сервисы DSH 0.2 (там, где оригинал ждал
 > удалённый `apiProxy`), и русская карточка бота. Репозиторий:
-> <https://github.com/danilinao/dsh-telegram-channel>. Что именно изменено и как
+> <https://github.com/danilinao/dsh-telegram-channel-ru>. Что именно изменено и как
 > синхронизироваться с оригиналом — в [UPSTREAM.md](UPSTREAM.md).
+>
+> **Имя пакета и имя репозитория — `dsh-telegram-channel-ru`** (суффикс `-ru`
+> отделяет русское ответвление от оригинала в общем пространстве имён; на npm
+> пакет с 0.8.1). Плагин в профиле DSH тоже называется `dsh-telegram-channel-ru`.
+> Старые адреса `danilinao/dsh-telegram-channel` продолжают работать — GitHub
+> редиректит их на новое имя.
 
 Telegram-пульт для **DeepSeek Harness**: телефон подключается к уже идущей сессии
 на компьютере и продолжает её — **один диалог, две стороны**. Компьютер остаётся
@@ -67,10 +73,10 @@ Telegram-пульт для **DeepSeek Harness**: телефон подключа
 
 ## Установка
 
-Из npm — [`dsh-telegram-channel`](https://www.npmjs.com/package/dsh-telegram-channel):
+Из npm — [`dsh-telegram-channel-ru`](https://www.npmjs.com/package/dsh-telegram-channel-ru):
 
 ```bash
-dsh plugin --profile web add dsh-telegram-channel
+dsh plugin --profile web add dsh-telegram-channel-ru
 systemctl restart dsh           # плагин монтируется при старте
 ```
 
@@ -78,7 +84,7 @@ systemctl restart dsh           # плагин монтируется при с�
 прямо из папки проекта:
 
 ```bash
-git clone https://github.com/danilinao/dsh-telegram-channel
+git clone https://github.com/danilinao/dsh-telegram-channel-ru
 dsh plugin --profile web add link:$PWD/dsh-telegram-channel
 systemctl restart dsh
 ```
@@ -87,16 +93,24 @@ systemctl restart dsh
 Если правите код — соберите заново (`src/` → `lib/`): см.
 [BUILD.md](BUILD.md) (`npm install && npm run check`).
 
-Конфигурация — строка `- id: dsh-telegram-channel` в `~/.dsh/profiles/web/cordis.patch.yml`
+Конфигурация — строка `- id: dsh-telegram-channel-ru` в `~/.dsh/profiles/web/cordis.patch.yml`
 (именно `id`-оверрайд, а не `insert`: id уже вставлен бандлом плагина):
 
 ```yaml
-- id: dsh-telegram-channel
-  name: dsh-telegram-channel
+- id: dsh-telegram-channel-ru
+  name: dsh-telegram-channel-ru
   config:
     token: "<токен от @BotFather>"
     allowedUserIds: [<ваш числовой id из @userinfobot>]
 ```
+
+> **Переезд с 0.8.0 на 0.8.1.** Пакет переименован в `dsh-telegram-channel-ru`,
+> и вместе с ним изменился `id` плагина в профиле: старая строка
+> `- id: dsh-telegram-channel` больше не совпадает с именем пакета, а значит
+> конфиг (токен и белый список) не применится. Порядок: добавить в
+> `cordis.patch.yml` строку с новым `id` (и `name: dsh-telegram-channel-ru`) с тем
+> же `config`, затем удалить старую строку и сделать
+> `dsh plugin --profile web remove dsh-telegram-channel`; перезапуск — после этого.
 
 | Ключ | Смысл |
 |---|---|
@@ -250,13 +264,13 @@ sync/publish workflow.
 ## Installation
 
 ```bash
-git clone https://github.com/danilinao/dsh-telegram-channel /path/to/dsh-telegram-channel
+git clone https://github.com/danilinao/dsh-telegram-channel-ru /path/to/dsh-telegram-channel
 dsh plugin --profile web add link:/path/to/dsh-telegram-channel
 systemctl restart dsh        # the plugin is mounted at startup only
 ```
 
 Or install the published package instead of the checkout:
-`dsh plugin --profile web add dsh-telegram-channel`.
+`dsh plugin --profile web add dsh-telegram-channel-ru`.
 
 The repository ships a built `lib/`, so a clone runs as-is. If you edit `src/`,
 rebuild it (`npm install && npm run check`) — DSH executes `lib/index.js`, never
@@ -269,8 +283,8 @@ row id is already inserted by the plugin bundle, so re-`insert` would create a
 duplicate and the loader would reject it):
 
 ```yaml
-- id: dsh-telegram-channel
-  name: dsh-telegram-channel
+- id: dsh-telegram-channel-ru
+  name: dsh-telegram-channel-ru
   config:
     token: "<BotFather token>"
     allowedUserIds: [123456789]
@@ -366,7 +380,7 @@ moves to an incompatible version, DSH refuses to load the plugin — either wide
 the ranges or grant the exemption:
 
 ```bash
-dsh plugin --profile web allow-version dsh-telegram-channel@<version> \
+dsh plugin --profile web allow-version dsh-telegram-channel-ru@<version> \
   --dsh-version <dsh version> --accept-risk
 ```
 

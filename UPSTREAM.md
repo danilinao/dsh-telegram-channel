@@ -7,7 +7,7 @@
 изменения. `upstream` — обычный remote для синхронизации с оригиналом.
 
 ```
-origin    https://github.com/danilinao/dsh-telegram-channel.git
+origin    https://github.com/danilinao/dsh-telegram-channel-ru.git
 upstream  https://github.com/hi-wenw/dsh-telegram-channel.git
 ```
 
@@ -75,7 +75,7 @@ npm run check    # typecheck → build → 62 теста → проверка с
 
 ```bash
 # онлайн-установка с GitHub (то, что стоит сейчас)
-dsh plugin --profile web add github:danilinao/dsh-telegram-channel
+dsh plugin --profile web add github:danilinao/dsh-telegram-channel-ru
 # разработка из этой папки
 dsh plugin --profile web add link:/home/alexey/projects/tg-bot-dsh
 systemctl restart dsh        # плагин монтируется только при старте
@@ -83,7 +83,7 @@ systemctl restart dsh        # плагин монтируется только 
 
 > Переезд 2026-10-21: код лежит в `/home/alexey/projects/tg-bot-dsh`.
 > Вечером того же дня профиль переведён на онлайн-установку —
-> `github:danilinao/dsh-telegram-channel` (0.8.0); симлинк
+> `github:danilinao/dsh-telegram-channel-ru` (0.8.0); симлинк
 > `/home/alexey/dsh-plugins/dsh-telegram-channel` больше не используется и нужен
 > только для возврата к `link:` при разработке.
 

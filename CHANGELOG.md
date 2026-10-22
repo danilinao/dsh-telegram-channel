@@ -2,6 +2,30 @@
 
 Формат — [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/), версии — SemVer.
 
+## 0.8.1 — 2026-10-22
+
+Пакет и репозиторий переименованы, публикация переехала в CI.
+
+### Изменено
+- **Имя пакета и репозитория: `dsh-telegram-channel` →
+  `dsh-telegram-channel-ru`.** Суффикс отделяет русское ответвление от
+  оригинала (`hi-wenw/dsh-telegram-channel`) в общем пространстве имён npm.
+  GitHub редиректит старые адреса, `npm i dsh-telegram-channel@0.8.0` продолжает
+  работать (старое имя осталось опубликованным). Вместе с пакетом изменился
+  `id` плагина в профиле DSH — строка с токеном в
+  `~/.dsh/profiles/web/cordis.patch.yml` должна быть
+  `- id: dsh-telegram-channel-ru` (порядок переезда — в README).
+- **Публикация в npm — из GitHub Actions.** Workflow
+  `.github/workflows/publish.yml` на тег `v*`: `npm ci` → `npm run check` →
+  `npm publish --provenance` через Trusted Publishing (OIDC), без токенов в
+  репозитории и без секретов. Если версия уже в реестре, шаг публикации
+  пропускается; расхождение тега и версии в `package.json` валит сборку.
+  Локальный `./PUBLISH-npm.sh` остаётся запасным путём (без provenance).
+
+### Добавлено
+- Тест, который сверяет имя пакета, `export const name` плагина и `id` в
+  `cordis.patch.yml` — разъехавшиеся имена ломают id-оверрайд с токеном.
+
 ## 0.8.0 — 2026-10-21
 
 Проект стал самодостаточным: собирается, тестируется и пакуется на месте.

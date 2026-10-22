@@ -1,6 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis';
 import Schema from '@deepseek-ai/schemastery';
-export declare const name = "dsh-telegram-channel";
+export declare const name = "dsh-telegram-channel-ru";
 /** agents: followup; apiProxy and userQuestions are optional runtime services. */
 export declare const inject: string[];
 export interface TelegramChannelConfig {

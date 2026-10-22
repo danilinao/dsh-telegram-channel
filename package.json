@@ -1,6 +1,6 @@
 {
-  "name": "dsh-telegram-channel",
-  "version": "0.8.0",
+  "name": "dsh-telegram-channel-ru",
+  "version": "0.8.1",
   "description": "Telegram-пульт для DeepSeek Harness: живая Web-сессия на телефоне — русский интерфейс, архивные сессии скрыты, имя сессии на кнопке",
   "keywords": [
     "telegram",
@@ -28,12 +28,12 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/danilinao/dsh-telegram-channel.git"
+    "url": "git+https://github.com/danilinao/dsh-telegram-channel-ru.git"
   },
   "bugs": {
-    "url": "https://github.com/danilinao/dsh-telegram-channel/issues"
+    "url": "https://github.com/danilinao/dsh-telegram-channel-ru/issues"
   },
-  "homepage": "https://github.com/danilinao/dsh-telegram-channel#readme",
+  "homepage": "https://github.com/danilinao/dsh-telegram-channel-ru#readme",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",

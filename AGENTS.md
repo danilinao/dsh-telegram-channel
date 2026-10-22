@@ -1,10 +1,14 @@
 # tg-bot-dsh — правила работы агента
 
-Telegram-пульт для DeepSeek Harness: плагин `dsh-telegram-channel` (ответвление
-`hi-wenw/dsh-telegram-channel`). Плагин живёт **внутри процесса `dsh web`**. В профиле `web` он установлен
-онлайн — `github:danilinao/dsh-telegram-channel` (снимок `main`), поэтому правки
+Telegram-пульт для DeepSeek Harness: плагин `dsh-telegram-channel-ru` (пакет на
+npm; ответвление `hi-wenw/dsh-telegram-channel`, репозиторий тоже переименован в
+`danilinao/dsh-telegram-channel-ru`, старые адреса редиректятся).
+Плагин живёт **внутри процесса `dsh web`**. В профиле `web` он установлен
+онлайн — `github:danilinao/dsh-telegram-channel-ru` (снимок `main`), поэтому правки
 в этой папке в бота сами не попадают: для разработки переключить на
 `link:/home/alexey/projects/tg-bot-dsh`, после — вернуть `github:` и переустановить.
+Помнить: `id` плагина в профиле равен имени пакета (`dsh-telegram-channel-ru`),
+поэтому строка с токеном в `cordis.patch.yml` должна быть с этим `id`.
 
 ## Сначала — память
 
@@ -48,14 +52,15 @@ Telegram-пульт для DeepSeek Harness: плагин `dsh-telegram-channel`
   --no-git-tag-version` → запись в `CHANGELOG.md` → коммит → `git tag vX.Y.Z` →
   `git push origin main --tags` (или `./PUBLISH.sh`, он берёт токен из хранилища
   DSH) → GitHub Release с описанием из `CHANGELOG.md`.
-- npm-публикация настроена: пакет `dsh-telegram-channel` на npm (владелец
-  `lex1133`), токен — `NPM_TOKEN` в `~/.dsh/.credentials.yaml`, публикует
-  `./PUBLISH-npm.sh` (`--dry-run` — только показать состав). У аккаунта
-  включены 2FA и staged publishing: первая отправка создаёт в реестре заглушку
-  `0.0.0-stage` и держит версию до подтверждения 2FA; повторный `npm publish`
-  ответит `You cannot publish over the previously published versions` — это
-  признак, что версия уже принята. Подробности и способы проверки — в
-  [BUILD.md](BUILD.md#npm).
+- npm-публикация: пакет `dsh-telegram-channel-ru` на npm (владелец
+  `lex1133`). **Основной путь — CI без токенов:** толчок тега `v*` запускает
+  `.github/workflows/publish.yml` (Trusted Publishing по OIDC, `--provenance`).
+  Доверие к workflow настраивается один раз владельцем через `npm trust github`
+  или страницу пакета на npmjs.com (требует 2FA и сессии — granular-токен не
+  подходит). Запасной путь — `./PUBLISH-npm.sh` с токеном `NPM_TOKEN` из
+  `~/.dsh/.credentials.yaml` (`--dry-run` — только состав). Загвоздки ручной
+  публикации (staged publishing, заглушка `0.0.0-stage`, «cannot publish over»)
+  разобраны в [BUILD.md](BUILD.md).
 
 ## Секреты
 

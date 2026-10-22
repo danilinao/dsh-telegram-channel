@@ -74,14 +74,16 @@ dsh plugin --profile web add link:/home/alexey/projects/tg-bot-dsh
 systemctl restart dsh          # плагин монтируется только при старте
 ```
 
-Из npm (когда пакет опубликован):
+Из npm:
 
 ```bash
-dsh plugin --profile web add dsh-telegram-channel
+dsh plugin --profile web add dsh-telegram-channel-ru
 ```
 
 Конфиг — id-оверрайд в `~/.dsh/profiles/web/cordis.patch.yml` (токен, белый
-список); подробности в `README.md`.
+список); подробности в `README.md`. `id` строки равен имени пакета, поэтому при
+переименовании пакета меняется и `id` — старую строку с конфигом нужно перенести
+(см. раздел про переезд в `README.md`).
 
 ## Версия и совместимость
 
@@ -91,7 +93,7 @@ DSH сверяет peer-зависимости `@deepseek-ai/dsh*` с верси
 откажется грузить плагин — тогда либо правим диапазоны, либо выдаём исключение:
 
 ```bash
-dsh plugin --profile web allow-version dsh-telegram-channel@<версия> \
+dsh plugin --profile web allow-version dsh-telegram-channel-ru@<версия> \
   --dsh-version <версия dsh> --accept-risk
 ```
 
@@ -103,35 +105,71 @@ dsh plugin --profile web allow-version dsh-telegram-channel@<версия> \
 npm version minor --no-git-tag-version   # или major/patch — поднимает версию
 npm run check                            # всё зелёное
 git commit -am "release: vX.Y.Z"
-git tag vX.Y.Z && git push origin main --tags
-./PUBLISH.sh                             # GitHub, токен из хранилища DSH
-./PUBLISH-npm.sh                         # npm, токен NPM_TOKEN из хранилища DSH
+./PUBLISH.sh                             # GitHub: push main + теги (токен из хранилища DSH)
 ```
+Толчок тега `vX.Y.Z` запускает GitHub Actions и **публикацию в npm** (см. ниже).
 
 Релиз (GitHub) делается на каждое **крупное** изменение: заголовок — версия,
 описание — из `CHANGELOG.md`. Мелкие правки едут обычными коммитами.
 
-### npm
+### npm: публикация из GitHub Actions (основной путь)
 
-Пакет живёт на npm как `dsh-telegram-channel` (владелец `lex1133`).
-`./PUBLISH-npm.sh` берёт токен из `~/.dsh/.credentials.yaml` (ключ `NPM_TOKEN`),
-кладёт его во временный `npmrc` (0600, удаляется по выходу) и вызывает
-`npm publish`; `--dry-run` показывает состав без публикации. В `~/.npmrc`,
-`.git/config` и историю shell токен не попадает.
+Пакет — `dsh-telegram-channel-ru` (владелец `lex1133`). Публикует workflow
+[`.github/workflows/publish.yml`](.github/workflows/publish.yml) через **Trusted
+Publishing** (OIDC): в `package.json` нет токенов, в настройках репозитория нет
+секретов — npm выдаёт короткоживущий токен за доверие к конкретному workflow
+этого репозитория (`npm trust github`, он же Trusted Publisher на сайте).
+Provenance (`--provenance`) при этом прикрепляется автоматически, поэтому у
+версии на npm виден провенанс-бейдж и связь с коммитом.
+
+```bash
+git tag v0.9.0 && git push origin v0.9.0   # → Actions: npm ci, npm run check, npm publish
+```
+
+Доверие привязано к паре «репозиторий + файл workflow» —
+`danilinao/dsh-telegram-channel-ru` + `publish.yml`. **Переименование репозитория
+или файла workflow ломает публикацию:** OIDC-claims перестают совпадать с
+настроенным доверием. Тогда `npm trust revoke` + повторный `npm trust github`
+(или правка на странице пакета). То же — при переносе пакета в организацию.
+
+Workflow идемпотентен: если версия из `package.json` уже есть в реестре, шаг
+публикации пропускается, а при расхождении тега и версии сборка падает.
+
+Состояние доверия:
+
+```bash
+npm trust list dsh-telegram-channel-ru       # что настроено
+npm trust revoke dsh-telegram-channel-ru --id=<id>
+```
+
+Правка доверия требует 2FA и сессии npm (granular-токен с bypass 2FA для
+`npm trust` не годится) — это делает владелец аккаунта на
+<https://www.npmjs.com/package/dsh-telegram-channel-ru/access>.
+
+### npm: локальная публикация (запасной путь)
+
+```bash
+./PUBLISH-npm.sh            # npm publish, токен NPM_TOKEN из хранилища DSH
+./PUBLISH-npm.sh --dry-run  # только состав пакета
+```
+
+Скрипт берёт токен из `~/.dsh/.credentials.yaml`, кладёт его во временный
+`npmrc` (0600, удаляется по выходу) и вызывает `npm publish`; в `~/.npmrc`,
+`.git/config` и историю shell токен не попадает. Локальная публикация идёт **без
+provenance** — это нормально для запасного пути, но основная дорога — CI.
 
 Что стоит знать, если публикация ведёт себя странно:
 
-- **У аккаунта включено staged publishing + 2FA.** Первый `npm publish`
-  не падает, а создаёт в реестре версию-заглушку `0.0.0-stage` («Temporary
-  Holding Version») и держит настоящую версию до подтверждения 2FA.
+- **У аккаунта включено staged publishing + 2FA.** Ручной `npm publish` может
+  не упасть, а создать в реестре версию-заглушку `0.0.0-stage` («Temporary
+  Holding Version») и держать настоящую версию до подтверждения 2FA.
   `npm stage list` при этом может показывать пусто — надёжнее смотреть
   авторизованный packument:
-  `curl -H "Authorization: Bearer $NPM_TOKEN" https://registry.npmjs.org/dsh-telegram-channel`
+  `curl -H "Authorization: Bearer $NPM_TOKEN" https://registry.npmjs.org/dsh-telegram-channel-ru`
   — в нём видно и заглушку, и ожидающую версию (`dist-tags.latest`).
-- **Повторная отправка той же версии.** `npm stage publish` (или повторный
-  `npm publish`) уже существующую версию не отправит:
-  `You cannot publish over the previously published versions: X.Y.Z` — это
-  значит, что версия уже принята, и надо просто проверить реестр.
+- **Повторная отправка той же версии.** `npm publish` уже существующую версию не
+  отправит: `You cannot publish over the previously published versions: X.Y.Z` —
+  это значит, что версия уже принята, и надо просто проверить реестр.
 - **Заглушка `0.0.0-stage`** остаётся в списке версий, если версия ушла вторым
   заходом. Удалить её может только владелец на сайте npm (или токен с правом
   bypass 2FA): `npm unpublish` из-под granular-токена отвечает
@@ -142,10 +180,10 @@ git tag vX.Y.Z && git push origin main --tags
 Проверка после публикации:
 
 ```bash
-curl -s https://registry.npmjs.org/dsh-telegram-channel | python3 -c \
+curl -s https://registry.npmjs.org/dsh-telegram-channel-ru | python3 -c \
   "import json,sys;d=json.load(sys.stdin);print(d['dist-tags'],list(d['versions']))"
-cd /tmp && npm i dsh-telegram-channel@<версия> && node -p \
-  "require('/tmp/node_modules/dsh-telegram-channel/package.json').version"
+cd /tmp && npm i dsh-telegram-channel-ru@<версия> && node -p \
+  "require('/tmp/node_modules/dsh-telegram-channel-ru/package.json').version"
 ```
 
 ## English (short)
@@ -154,4 +192,5 @@ cd /tmp && npm i dsh-telegram-channel@<версия> && node -p \
 because DSH runs the package from the checkout. `npm install && npm run check`
 (or `npm run build`) is the whole toolchain; `npm run test:lib` fails when
 `lib/` is stale. Publishing runs `clean → build → test → test:lib` via
-`prepublishOnly`.
+`prepublishOnly`. Releases are published to npm from GitHub Actions on a `v*` tag
+using npm Trusted Publishing (OIDC, no tokens in the repo).
