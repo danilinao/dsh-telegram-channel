@@ -1,0 +1,81 @@
+name: publish
+
+# Публикация в npm через Trusted Publishing (OIDC GitHub Actions).
+# Токенов и секретов нет: npm доверяет конкретному workflow этого репозитория
+# (см. «npm trust» / Trusted Publisher в настройках пакета) и выдаёт короткоживущий
+# токен по OIDC. Первая версия под новым именем опубликована вручную — trust
+# можно завести только для уже существующего пакета.
+#
+#   git tag v0.8.1 && git push origin v0.8.1   # публикует версию из package.json
+#
+# Повторный запуск на уже опубликованную версию ничего не делает (шаг проверки).
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write # OIDC → npm trusted publishing и provenance
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          cache: npm
+
+      - run: npm ci
+
+      - name: Проверки (typecheck → build → тесты → свежесть lib/)
+        run: npm run check
+
+      - name: Версия и состояние реестра
+        id: meta
+        run: |
+          NAME=$(node -p "require('./package.json').name")
+          VERSION=$(node -p "require('./package.json').version")
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "пакет: $NAME@$VERSION"
+          if npm view "$NAME@$VERSION" version >/dev/null 2>&1; then
+            echo "опубликовано: да (пропускаем publish)"
+            echo "published=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "опубликовано: нет"
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Тег совпадает с версией в package.json
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          expected="v${{ steps.meta.outputs.version }}"
+          if [ "$expected" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::тег $GITHUB_REF_NAME не совпадает с версией ${{ steps.meta.outputs.version }}"
+            exit 1
+          fi
+
+      - name: Публикация в npm
+        if: steps.meta.outputs.published == 'false'
+        run: npm publish --provenance --access public
+
+      - name: Сводка
+        run: |
+          {
+            echo "### npm publish"
+            echo
+            echo "- пакет: \`${{ steps.meta.outputs.name }}@${{ steps.meta.outputs.version }}\`"
+            echo "- статус: ${{ steps.meta.outputs.published == 'true' && 'уже был в реестре' || 'опубликован сейчас' }}"
+            echo "- страница: https://www.npmjs.com/package/${{ steps.meta.outputs.name }}"
+          } >> "$GITHUB_STEP_SUMMARY"
