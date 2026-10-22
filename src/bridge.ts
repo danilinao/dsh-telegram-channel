@@ -251,6 +251,21 @@ function contentToText(content: unknown): string {
     .join('')
 }
 
+/**
+ * Reasoning text of one durable assistant message. DSH 0.2 records the model's
+ * thinking as `reasoning` content blocks of the finalized `assistant/message`;
+ * the streaming `assistant/chunk` events the bridge also understands never reach
+ * a `session/event` listener on this host, so this is the reliable source.
+ */
+function reasoningToText(content: unknown): string {
+  if (!Array.isArray(content)) return ''
+  return content
+    .filter((block): block is { type?: string; text?: string } => (block as { type?: string })?.type === 'reasoning')
+    .map((block) => (typeof block.text === 'string' ? block.text : ''))
+    .filter((text) => text.length > 0)
+    .join('\n\n')
+}
+
 function isRichUnsupportedError(err: unknown): boolean {
   const message = err instanceof Error ? err.message : String(err)
   return /method not found|unknown method|not found|404|bad request|can't parse|rich message/i.test(message)
@@ -279,6 +294,8 @@ export class TelegramBridge {
   /** Per-chat rendering override (persisted): rich messages need a recent Telegram
    *  client — old ones (e.g. 10.x) cannot render them and show “unsupported”. */
   private readonly renderPrefs = new Map<string, 'rich' | 'html'>()
+  /** chatId → присылать рассуждения спойлером (по умолчанию да; persisted). */
+  private readonly reasoningPrefs = new Map<string, boolean>()
 
   private readonly bindings = new Map<string, Binding>()
   private readonly pickers = new Map<string, PickerState>()
@@ -397,6 +414,7 @@ export class TelegramBridge {
       { command: 'status', description: 'Состояние: модель, контекст, статистика' },
       { command: 'compact', description: 'Сжать историю сессии (сократить контекст)' },
       { command: 'rich', description: 'Рендер: on rich / off HTML (для этого чата)' },
+      { command: 'reasoning', description: 'Рассуждения спойлером: on / off (для этого чата)' },
       { command: 'unbind', description: 'Отвязать телефон (сессия остаётся)' },
       { command: 'stop', description: 'Прервать текущую задачу' },
       { command: 'mission', description: 'Список задач и прогресс' },
@@ -460,6 +478,7 @@ export class TelegramBridge {
     // Never dispose host agents — only clear remote bindings.
     this.bindings.clear()
     this.renderPrefs.clear()
+    this.reasoningPrefs.clear()
     this.pickers.clear()
     this.pendingModels.clear()
     this.stopAllHeartbeats()
@@ -719,6 +738,9 @@ export class TelegramBridge {
         return
       case 'rich':
         await this.handleRichCommand(chatId, parsed.arg)
+        return
+      case 'reasoning':
+        await this.handleReasoningCommand(chatId, parsed.arg)
         return
       case 'unbind':
         this.bindings.delete(String(chatId))
@@ -1949,8 +1971,20 @@ export class TelegramBridge {
     }
 
     if (event.type === 'assistant/message') {
-      const text = contentToText(event.data.message.content)
+      const content = event.data.message.content
+      const text = contentToText(content)
       this.thinkingSessions.set(id, false)
+      // Reasoning rides on the finalized message (see `reasoningToText`); a
+      // streamed prefix in the buffer is the fallback, never both at once.
+      const streamed = this.reasoningBuffers.get(id)
+      this.reasoningBuffers.delete(id)
+      const reasoning = reasoningToText(content).trim() || (streamed ?? '').trim()
+      if (reasoning.length > 0) {
+        for (const b of targets) {
+          if (!this.showReasoning(b.chatId)) continue
+          await this.sendHtml(b.chatId, this.spoilerBlock(MSG.REASONING_TITLE, reasoning))
+        }
+      }
       if (!text) return
       await Promise.all(targets.map((b) => this.deliver(b.chatId, text)))
       return
@@ -2731,14 +2765,53 @@ export class TelegramBridge {
     return `<blockquote expandable>${title}\n<pre>${escapeHtml(text)}</pre></blockquote>`
   }
 
-  /** Flush accumulated reasoning of one session as a spoiler block. */
+  /** Whether this chat wants the model's reasoning as a spoiler (default: yes). */
+  private showReasoning(chatId: number): boolean {
+    return this.reasoningPrefs.get(String(chatId)) !== false
+  }
+
+  /** Flush streamed reasoning of one session as a spoiler block (fallback path). */
   private async flushReasoning(sessionId: string): Promise<void> {
     const buffered = this.reasoningBuffers.get(sessionId)
     this.reasoningBuffers.delete(sessionId)
     if (!buffered || buffered.trim().length === 0) return
     const targets = [...this.bindings.values()].filter((b) => b.sessionId === sessionId)
     for (const b of targets) {
-      await this.sendHtml(b.chatId, this.spoilerBlock('🧠 Рассуждения', buffered.trim()))
+      if (!this.showReasoning(b.chatId)) continue
+      await this.sendHtml(b.chatId, this.spoilerBlock(MSG.REASONING_TITLE, buffered.trim()))
+    }
+  }
+
+  /** `/reasoning [on|off]` — remember whether reasoning is mirrored into this chat. */
+  private async handleReasoningCommand(chatId: number, arg: string | undefined): Promise<void> {
+    const key = String(chatId)
+    switch (arg) {
+      case 'on':
+      case 'yes':
+      case 'show':
+        this.reasoningPrefs.set(key, true)
+        this.saveBindings()
+        await this.client.sendMessage(chatId, MSG.REASONING_SET(true))
+        return
+      case 'off':
+      case 'no':
+      case 'hide':
+        this.reasoningPrefs.set(key, false)
+        this.saveBindings()
+        await this.client.sendMessage(chatId, MSG.REASONING_SET(false))
+        return
+      case 'auto':
+      case 'default':
+      case 'reset':
+        this.reasoningPrefs.delete(key)
+        this.saveBindings()
+        await this.client.sendMessage(chatId, MSG.REASONING_STATE(true))
+        return
+      case undefined:
+        await this.client.sendMessage(chatId, MSG.REASONING_STATE(this.showReasoning(chatId)))
+        return
+      default:
+        await this.client.sendMessage(chatId, MSG.REASONING_USAGE)
     }
   }
 
@@ -2913,6 +2986,7 @@ export class TelegramBridge {
       const obj = {
         bindings: Object.fromEntries(this.bindings),
         renderPrefs: Object.fromEntries(this.renderPrefs),
+        reasoningPrefs: Object.fromEntries([...this.reasoningPrefs].map(([chatId, on]) => [chatId, on ? 'on' : 'off'])),
         notifyPrefs: Object.fromEntries(this.notifyPrefs),
         notifyScope: Object.fromEntries(this.notifyScope),
         knownChats: [...this.knownChats],
@@ -2935,6 +3009,7 @@ export class TelegramBridge {
       const data = parsed as {
         bindings?: Record<string, { chatId?: number; sessionId?: string; label?: string }>
         renderPrefs?: Record<string, string>
+        reasoningPrefs?: Record<string, string>
         notifyPrefs?: Record<string, string>
         notifyScope?: Record<string, string>
         knownChats?: number[]
@@ -2959,6 +3034,10 @@ export class TelegramBridge {
         if (mode === 'rich' || mode === 'html') {
           this.renderPrefs.set(String(chatId), mode)
         }
+      }
+      for (const [chatId, mode] of Object.entries(data.reasoningPrefs ?? {})) {
+        if (mode === 'on') this.reasoningPrefs.set(String(chatId), true)
+        else if (mode === 'off') this.reasoningPrefs.set(String(chatId), false)
       }
       for (const [chatId, mode] of Object.entries(data.notifyPrefs ?? {})) {
         if (mode === 'all' || mode === 'errors' || mode === 'off') {

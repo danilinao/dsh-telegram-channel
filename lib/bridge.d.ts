@@ -45,6 +45,8 @@ export declare class TelegramBridge {
     /** Per-chat rendering override (persisted): rich messages need a recent Telegram
      *  client — old ones (e.g. 10.x) cannot render them and show “unsupported”. */
     private readonly renderPrefs;
+    /** chatId → присылать рассуждения спойлером (по умолчанию да; persisted). */
+    private readonly reasoningPrefs;
     private readonly bindings;
     private readonly pickers;
     /** Session names fetched from host projections, keyed by id and updatedAt. */
@@ -314,8 +316,12 @@ export declare class TelegramBridge {
     private sendHtml;
     /** Collapsible block: Telegram shows it as "expandable quote", hidden by default. */
     private spoilerBlock;
-    /** Flush accumulated reasoning of one session as a spoiler block. */
+    /** Whether this chat wants the model's reasoning as a spoiler (default: yes). */
+    private showReasoning;
+    /** Flush streamed reasoning of one session as a spoiler block (fallback path). */
     private flushReasoning;
+    /** `/reasoning [on|off]` — remember whether reasoning is mirrored into this chat. */
+    private handleReasoningCommand;
     /** List archived sessions with one-tap restore. */
     private sendArchivedPicker;
     /** Restore one session from the archive (host registry, DSH 0.2). */

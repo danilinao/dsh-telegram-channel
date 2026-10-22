@@ -12,6 +12,7 @@ export const MSG = {
     '/status — состояние: привязка, ID сессии, рабочая область, модель, глубина размышлений, контекст, токены',
     '/compact — сжать историю сессии (сократить контекст; только когда сессия свободна)',
     '/rich — режим рендера: on=rich (нужен свежий клиент) / off=HTML (по умолчанию); запоминается для этого чата',
+    '/reasoning on|off — показывать рассуждения модели спойлером (по умолчанию on); запоминается для этого чата',
     '/newproject <путь> [ | Название] — добавить папку как проект (рабочую область)',
     '/archive — убрать привязанную сессию в архив (работа останавливается)',
     '/archived — список архива с кнопкой «вернуть»',
@@ -132,6 +133,19 @@ export const MSG = {
       ? 'Включён rich-рендер (для этого чата). Нужен свежий клиент Telegram, старые покажут «не поддерживается».'
       : 'Включён HTML-рендер (для этого чата) — отображается во всех версиях клиента.'
   },
+  /** Spoiler title above the model's reasoning. */
+  REASONING_TITLE: '🧠 Рассуждения',
+  REASONING_USAGE: 'Использование: /reasoning on — присылать рассуждения спойлером | /reasoning off — не присылать | /reasoning (текущее состояние)',
+  REASONING_STATE(on: boolean): string {
+    return on
+      ? 'Рассуждения модели приходят в этот чат спойлером «🧠 Рассуждения» (свернуто, нажмите, чтобы раскрыть).\nВыключить: /reasoning off'
+      : 'Рассуждения модели в этот чат не приходят.\nВключить: /reasoning on'
+  },
+  REASONING_SET(on: boolean): string {
+    return on
+      ? 'Готово: рассуждения модели будут приходить спойлером перед ответом (для этого чата).'
+      : 'Готово: рассуждения модели в этот чат больше не приходят (для этого чата).'
+  },
   MODEL_FAILED(detail?: string): string {
     const tip = 'Не удалось переключить модель. Повторите позже или смените её в Web.'
     if (!detail) return tip
@@ -151,6 +165,7 @@ export type ParsedCommand =
   | { type: 'status'; text: string }
   | { type: 'compact'; text: string }
   | { type: 'rich'; text: string; arg?: string }
+  | { type: 'reasoning'; text: string; arg?: string }
   | { type: 'unbind'; text: string }
   | { type: 'stop'; text: string }
   | { type: 'mission'; text: string }
@@ -191,6 +206,12 @@ export function parseCommand(text: string): ParsedCommand {
     case '/setting': {
       const arg = text.split(/\s+/)[1]?.toLowerCase()
       return { type: 'rich', text, arg }
+    }
+    case '/reasoning':
+    case '/thoughts':
+    case '/think': {
+      const arg = text.split(/\s+/)[1]?.toLowerCase()
+      return { type: 'reasoning', text, arg }
     }
     case '/unbind':
     case '/disconnect':

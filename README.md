@@ -51,9 +51,11 @@ Telegram-пульт для **DeepSeek Harness**: телефон подключа
   текущей области, 🗄 у сессии или `/archive` убирают её в архив (работа
   останавливается, из меню и Web сессия исчезает).
 - **Команды и рассуждения — целиком, но под спойлером.** Вызовы инструментов
-  приходят с полными аргументами, а текст рассуждений — отдельным блоком; и то и
-  другое свёрнуто в «раскрывающуюся цитату» Telegram (`<blockquote expandable>`),
-  разворачивается одним тапом.
+  приходят с полными аргументами, а рассуждения модели — отдельным блоком
+  «🧠 Рассуждения» перед каждым ответом. И то и другое свёрнуто в
+  «раскрывающуюся цитату» Telegram (`<blockquote expandable>`) и разворачивается
+  одним тапом; `/reasoning off` отключает рассуждения для конкретного чата
+  (по умолчанию они включены).
 - **История при открытии сессии.** При привязке сразу показываются последние
   сообщения диалога; кнопка «⬅ Раньше» листает глубже, `/history [seq]` — тоже
   вручную. В истории видны реплики пользователя, ответы ассистента и вызовы
@@ -192,6 +194,7 @@ systemctl restart dsh
 | `/status` | модель, глубина размышлений, контекст, TTFT, токены |
 | `/compact` | сжать историю сессии (когда она свободна) |
 | `/rich` | `on` — rich-рендер, `off` — HTML (для этого чата) |
+| `/reasoning` | `on`/`off` — присылать рассуждения модели спойлером (по умолчанию `on`, запоминается для чата) |
 | `/stop` | прервать текущий ход |
 | `/mission` | список задач и прогресс |
 | `/new` | новый диалог в текущей области и привязка |
@@ -272,6 +275,11 @@ sync/publish workflow.
 - **Images, not just text.** PNG/JPEG/WebP/GIF, with or without a caption; album
   photos are merged into a single message. Images go through the host attachment
   service, the same channel the web UI uses.
+- **Reasoning and tool calls, collapsed.** Each answer arrives after a
+  «🧠 Рассуждения» blockquote holding the model's thinking, and every tool call
+  arrives with its full arguments; both are Telegram expandable quotes
+  (`<blockquote expandable>`) that open with one tap. `/reasoning off` silences
+  the reasoning for one chat.
 - **Two-way questions and approvals.** When the agent asks a multiple-choice
   question or requests permission for a tool, you can answer from Telegram; an
   answer given in the web UI closes the Telegram channel for that request.
@@ -411,6 +419,7 @@ session, exactly as the single owner could. Add people deliberately and keep
 | `/status` | model, reasoning effort, context pressure, TTFT, input/output tokens, cache hit |
 | `/compact` | compact the attached session's history (only while it is idle) |
 | `/rich` | `on` — rich rendering, `off` — HTML (this chat only, remembered) |
+| `/reasoning` | `on`/`off` — mirror the model's reasoning as a spoiler (default `on`, per chat) |
 | `/stop` | abort the current turn |
 | `/mission` | todo list and progress |
 | `/new` | create a new session in the current workspace and attach to it |

@@ -53,6 +53,11 @@ export declare const MSG: {
     readonly RICH_USAGE: "Использование: /rich on (rich-рендер, нужен свежий клиент) | /rich off (HTML, по умолчанию) | /rich (текущее состояние)";
     readonly RICH_STATE: (mode: "rich" | "html") => string;
     readonly RICH_SET: (mode: "rich" | "html") => string;
+    /** Spoiler title above the model's reasoning. */
+    readonly REASONING_TITLE: "🧠 Рассуждения";
+    readonly REASONING_USAGE: "Использование: /reasoning on — присылать рассуждения спойлером | /reasoning off — не присылать | /reasoning (текущее состояние)";
+    readonly REASONING_STATE: (on: boolean) => string;
+    readonly REASONING_SET: (on: boolean) => string;
     readonly MODEL_FAILED: (detail?: string) => string;
     readonly unknown: (command: string) => string;
 };
@@ -79,6 +84,10 @@ export type ParsedCommand = {
     text: string;
 } | {
     type: 'rich';
+    text: string;
+    arg?: string;
+} | {
+    type: 'reasoning';
     text: string;
     arg?: string;
 } | {
