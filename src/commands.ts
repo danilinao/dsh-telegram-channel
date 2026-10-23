@@ -17,6 +17,8 @@ export const MSG = {
     '/archive — убрать привязанную сессию в архив (работа останавливается)',
     '/archived — список архива с кнопкой «вернуть»',
     '/history [seq] — предыдущие сообщения сессии (листается кнопкой «⬅ Раньше»)',
+    '/retry — повторить последний отправленный запрос (после ошибки)',
+    '/find <текст> — найти сессии по названию или папке',
     '/notify on|errors|off — какие события присылать; /notify every|bound — за всеми сессиями или только за привязанной',
     'Вопрос сессии можно закрыть кнопкой-вариантом, кнопкой «✏️ Свой ответ» или просто текстом.',
     '/projects — список проектов и сессий (то же, что /sessions)',
@@ -174,6 +176,35 @@ export const MSG = {
   },
   APPROVAL_REJECTED: 'Запуск инструмента отклонён',
   APPROVAL_CLOSED: 'Это разрешение уже закрыто',
+  ASK_REMINDER(n: number): string {
+    return `⏳ Вопрос${n > 1 ? `ов: ${n}` : ''} всё ещё ждёт ответа — нажмите вариант, «✏️ Свой ответ» или просто напишите текст; /cancel — закрыть в TG.`
+  },
+  RETRY_NONE: 'Нечего повторять: в этом чате ещё не было отправленного запроса.',
+  RETRY_SENT: '🔁 Повторяю последний запрос…',
+  RETRY_BUTTON: '🔁 Повторить',
+  CONTINUE_BUTTON: '▶ Продолжить',
+  CONTINUE_TEXT: 'Продолжай с того места, где остановился.',
+  NTF_LAST_BUTTON: '📜 Последний ответ',
+  NTF_HIST_BUTTON: '📖 История',
+  FIND_USAGE: 'Использование: /find <текст> — поиск сессий по названию или папке',
+  FIND_NONE(q: string): string {
+    return `По запросу «${q}» сессий не нашлось.`
+  },
+  FIND_HEADER(q: string, n: number): string {
+    return `🔎 Найдено сессий: ${n} по запросу «${q}». Нажмите, чтобы привязаться:`
+  },
+  FILE_UNSUPPORTED: 'Этот файл не текстовый — не могу прочитать. Текст (txt/md/json/код) можно отправлять как документ; остальное — через Web.',
+  FILE_TOO_LARGE(limitKb: number): string {
+    return `Файл слишком большой для чтения в чате (лимит ${limitKb} КБ). Отправьте меньший или приложите его в Web.`
+  },
+  FILE_FAILED(detail?: string): string {
+    const tip = 'Не удалось прочитать файл.'
+    if (!detail) return tip
+    return `${tip}\nПодробности: ${detail}`
+  },
+  FILE_HEADER(name: string): string {
+    return `📄 Файл: ${name}`
+  },
   unknown(command: string): string {
     return `Неизвестная команда ${command}. Отправьте /help со списком команд.`
   },
@@ -200,6 +231,8 @@ export type ParsedCommand =
   | { type: 'projects'; text: string }
   | { type: 'archived'; text: string }
   | { type: 'history'; text: string; arg?: string }
+  | { type: 'retry'; text: string }
+  | { type: 'find'; text: string; arg?: string }
   | { type: 'unknown'; command: string; text: string }
   | { type: 'plain'; text: string }
 
@@ -268,6 +301,12 @@ export function parseCommand(text: string): ParsedCommand {
     case '/history':
     case '/log':
       return { type: 'history', text, arg: text.split(/\s+/)[1] }
+    case '/retry':
+    case '/again':
+      return { type: 'retry', text }
+    case '/find':
+    case '/search':
+      return { type: 'find', text, arg: text.split(/\s+/).slice(1).join(' ') }
     default:
       return { type: 'unknown', command, text }
   }
@@ -284,3 +323,12 @@ export const ASK_CB = 'q:'
 
 /** Inline button: resolve an approval request (`ap:1` allow once, `ap:0` reject). */
 export const APPROVAL_CB = 'ap:'
+
+/** Inline button: retry the last prompt of a session (`nt:retry:<sessionId>`). */
+export const RETRY_CB = 'nt:retry:'
+
+/** Inline button: continue a max-tokens-stopped turn (`nt:continue:<sessionId>`). */
+export const CONTINUE_CB = 'nt:continue:'
+
+/** Inline button: history of a session from a notification (`nt:hist:<sessionId>`). */
+export const NTF_HIST_CB = 'nt:hist:'

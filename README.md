@@ -40,7 +40,9 @@ Telegram-пульт для **DeepSeek Harness**: телефон подключа
   сессии, иначе из первого сообщения, иначе `рабочая область · дата`.
   `▶` — сессия в памяти, `▷` — поднимется при привязке.
 - **Не только текст.** Картинки (png/jpeg/webp/gif, в том числе с подписью;
-  альбомы склеиваются в одно сообщение).
+  альбомы склеиваются в одно сообщение) и текстовые документы — `txt`, `md`,
+  `json`, `yaml`, `csv`, код (`.gd`, `.ts`, `.py`, …), до 128 КБ: файл
+  приходит в сессию текстом вместе с подписью. Бинарные файлы — через Web.
 - **Двусторонние вопросы и подтверждения.** Когда агент спрашивает «какой
   вариант?» или просит разрешение на инструмент, ответить можно из Telegram:
   варианты приходят **inline-кнопками**, есть «✏️ Свой ответ» для свободного
@@ -79,7 +81,9 @@ Telegram-пульт для **DeepSeek Harness**: телефон подключа
   токенов, аварийный обрыв, и вопрос агента («❓ Сессия задала вопрос и ждёт
   ответа») — с названием сессии **и проекта**. По умолчанию бот **следит за всеми сессиями**,
   включая запущенные с компьютера; `/notify bound` сужает до привязанной,
-  `/notify on | errors | off` задаёт набор событий.
+  `/notify on | errors | off` задаёт набор событий. Под уведомлением — кнопки:
+  **🔁 Повторить** после ошибки, **▶ Продолжить** после лимита токенов,
+  **📜 Последний ответ** и **📖 История**.
 
 ## Установка
 
@@ -210,6 +214,8 @@ dsh-telegram-channel-ru**): обе стороны — один компонен�
 | `/archive` | убрать привязанную сессию в архив |
 | `/archived` | список архива, кнопка «↩» возвращает сессию |
 | `/history [seq]` | предыдущие сообщения сессии (листается «⬅ Раньше») |
+| `/retry` | повторить последний отправленный запрос (после ошибки) |
+| `/find <текст>` | найти сессии по названию или папке и привязаться кнопкой |
 | `/notify on\|errors\|off` | какие события присылать (всё / только ошибки / ничего) |
 | `/notify every\|bound` | за какими сессиями следить (всеми / только привязанной) |
 | `/projects` | список проектов и сессий (то же, что `/sessions`) |
@@ -288,6 +294,10 @@ sync/publish workflow.
   arrives with its full arguments; both are Telegram expandable quotes
   (`<blockquote expandable>`) that open with one tap. `/reasoning off` silences
   the reasoning for one chat.
+- **Not only text.** Photos (png/jpeg/webp/gif, captions and albums) and
+  text documents — `txt`, `md`, `json`, `yaml`, `csv`, code (`.gd`, `.ts`,
+  `.py`, …), up to 128 KB — arrive in the session as prompt text next to the
+  caption. Binary files go through the web UI.
 - **Two-way questions and approvals.** When the agent asks a multiple-choice
   question or requests permission for a tool, you can answer from Telegram:
   options arrive as **inline buttons**, alongside «✏️ Свой ответ» for free-form
@@ -438,6 +448,8 @@ session, exactly as the single owner could. Add people deliberately and keep
 | `/archive` | move the attached session to the archive |
 | `/archived` | archived sessions, "↩" restores one |
 | `/history [seq]` | earlier messages of the session ("⬅ Earlier" pages back) |
+| `/retry` | resend the last prompt (after an error) |
+| `/find <text>` | find sessions by title or folder and attach with a button |
 | `/notify on\|errors\|off` | which events this chat receives (all / errors only / none) |
 | `/notify every\|bound` | which sessions to follow (all / attached only) |
 | `/projects` | project/session list (alias of `/sessions`) |

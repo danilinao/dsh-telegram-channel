@@ -29,6 +29,10 @@ export interface BotIdentity {
     username?: string;
     name?: string;
 }
+/** Cap on a document we inline into a prompt (a phone should not paste a book). */
+export declare const MAX_TEXT_FILE_BYTES: number;
+/** One-shot reminder if a mirrored question is still unanswered after 5 minutes. */
+export declare const ASK_REMINDER_MS: number;
 export declare class TelegramBridge {
     private readonly ctx;
     private readonly token;
@@ -104,6 +108,8 @@ export declare class TelegramBridge {
     private readonly compactAborts;
     /** Album accumulation: chatId:media_group_id → parts buffered into one prompt. */
     private readonly mediaGroups;
+    /** sessionId → last text prompt sent from Telegram (for /retry and the 🔁 button). */
+    private readonly lastPromptBySession;
     constructor(ctx: Context, options: TelegramBridgeOptions);
     /** Effective rendering mode for a chat: per-chat override, else the global mode. */
     private modeFor;
@@ -227,12 +233,25 @@ export declare class TelegramBridge {
     /** 等待压缩落定并汇报结果（不阻塞轮询循环）。 */
     private runCompaction;
     private followupBound;
+    /** Send text to an explicit session (notification buttons work across bindings). */
+    private followupSession;
+    private deliverPrompt;
+    /** /retry: re-send the last text prompt of this chat's session. */
+    private retryLastPrompt;
     /**
      * Extract wire prompt parts from a media message.
      * Returns undefined when the message carries no media at all; returns [] for
      * an unsupported media type (the user was already notified); otherwise the
      * caption text part (when present) followed by the image part.
      */
+    private isImageDocument;
+    private isTextDocument;
+    /**
+     * Download a text document and deliver it as prompt text (with the caption).
+     * Binary documents are refused with an explicit notice — they would arrive as
+     * mojibake, and there is no attachment seam for arbitrary files.
+     */
+    private handleTextDocument;
     private collectMediaParts;
     /** Download one TG file and encode it as a canonical-base64 wire image part. */
     private downloadImagePart;
@@ -289,6 +308,9 @@ export declare class TelegramBridge {
     private refreshAskKeyboard;
     /** Drop inline keyboards that can no longer be used (answered in Web, /cancel, abort). */
     private clearAskKeyboards;
+    /** One gentle reminder; never repeats, never keeps the process alive. */
+    private armAskReminder;
+    private clearAskReminder;
     private maybeResolveAsk;
     private handleAskCallback;
     /** Text typed after «✏️ Свой ответ» answers exactly that question. */
@@ -302,6 +324,8 @@ export declare class TelegramBridge {
     private sendMission;
     /** /history [beforeSeq]: показать предыдущие сообщения сессии. */
     private handleHistoryCommand;
+    /** /find <text>: search session titles and folders, then bind with a button. */
+    private handleFindCommand;
     /** /new: create a session in the bound session's workspace and attach to it. */
     private newSessionHere;
     /**
@@ -351,5 +375,7 @@ export declare class TelegramBridge {
     private bindingsPath;
     private saveBindings;
     private loadBindings;
+    /** Inline actions on a turn/end notice: retry, continue, last answer, history. */
+    private turnNoticeKeyboard;
     private redact;
 }

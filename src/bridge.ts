@@ -32,7 +32,7 @@ import {
   type TelegramMessage,
   type TelegramUpdate,
 } from './client.js'
-import { MSG, LAST_CB, ASK_CB, APPROVAL_CB, parseCommand } from './commands.js'
+import { MSG, LAST_CB, ASK_CB, APPROVAL_CB, RETRY_CB, CONTINUE_CB, NTF_HIST_CB, parseCommand } from './commands.js'
 import { escapeHtml, markdownToHtml, splitMessage } from './format.js'
 import { splitRichMarkdown } from './rich-format.js'
 import { formatLastTurn, loadLastTurn } from './history.js'
@@ -134,6 +134,8 @@ interface TgPendingAsk {
   final: boolean[]
   /** Question index whose "✏️ Свой ответ" is waiting for the next text message. */
   awaitingCustom?: number
+  /** One-shot "still waiting" reminder while the question is unanswered. */
+  reminder?: ReturnType<typeof setTimeout>
 }
 
 /** chatId → pending approval request mirrored to Telegram. */
@@ -194,8 +196,26 @@ type WireContentPart =
 /** Host-admitted raster media types (@deepseek-ai/dsh-attachment). */
 const IMAGE_MEDIA_TYPES: readonly string[] = ['image/png', 'image/jpeg', 'image/webp', 'image/gif']
 
+/** Documents we can read as text: mime first, extension as a fallback. */
+const TEXT_FILE_EXTENSIONS: readonly string[] = [
+  '.txt', '.md', '.markdown', '.json', '.jsonl', '.yaml', '.yml', '.csv', '.tsv', '.log',
+  '.html', '.htm', '.xml', '.toml', '.ini', '.cfg', '.conf', '.gd', '.ts', '.tsx', '.js',
+  '.jsx', '.py', '.sh', '.rs', '.go', '.java', '.kt', '.c', '.h', '.cpp', '.hpp', '.cs',
+  '.lua', '.sql', '.css',
+]
+const TEXT_FILE_MIME_EXACT: readonly string[] = [
+  'application/json', 'application/jsonl', 'application/xml', 'application/yaml',
+  'application/x-yaml', 'application/toml', 'application/javascript', 'application/typescript',
+  'application/x-sh', 'application/sql',
+]
+/** Cap on a document we inline into a prompt (a phone should not paste a book). */
+export const MAX_TEXT_FILE_BYTES = 128 * 1024
+
 /** Album debounce window: TG emits each photo of an album as its own update. */
 const MEDIA_GROUP_WINDOW_MS = 1200
+
+/** One-shot reminder if a mirrored question is still unanswered after 5 minutes. */
+export const ASK_REMINDER_MS = 5 * 60 * 1000
 
 /**
  * 把 command-compact 返回的英文结果翻译成 TG 中文回复。
@@ -367,6 +387,8 @@ export class TelegramBridge {
   private readonly compactAborts = new Map<string, AbortController>()
   /** Album accumulation: chatId:media_group_id → parts buffered into one prompt. */
   private readonly mediaGroups = new Map<string, { chatId: number; parts: WireContentPart[]; timer?: ReturnType<typeof setTimeout> }>()
+  /** sessionId → last text prompt sent from Telegram (for /retry and the 🔁 button). */
+  private readonly lastPromptBySession = new Map<string, string>()
 
   constructor(ctx: Context, options: TelegramBridgeOptions) {
     this.ctx = ctx
@@ -692,6 +714,13 @@ export class TelegramBridge {
     this.rememberChat(chatId)
     this.rememberPerson(message.from)
 
+    // Text documents (md/json/code…) are inlined into the prompt instead of
+    // being rejected as "unsupported media"; photos keep the image path.
+    if (message.document && !this.isImageDocument(message.document)) {
+      await this.handleTextDocument(chatId, message)
+      return
+    }
+
     // Media messages: photos / image documents (optionally with a caption) are
     // admitted into the bound session; other media get an explicit notice.
     // A caption is treated as accompanying text — never parsed as a command.
@@ -791,6 +820,12 @@ export class TelegramBridge {
       case 'history':
         await this.handleHistoryCommand(chatId, parsed.arg)
         return
+      case 'retry':
+        await this.retryLastPrompt(chatId)
+        return
+      case 'find':
+        await this.handleFindCommand(chatId, parsed.arg)
+        return
       case 'cancel': {
         // /cancel closes the TG-side answer/approval channel; the UI side stays open.
         let cancelled = false
@@ -803,6 +838,7 @@ export class TelegramBridge {
         const pendingAsk = this.pendingAsks.get(String(chatId))
         if (pendingAsk) {
           this.pendingAsks.delete(String(chatId))
+          this.clearAskReminder(pendingAsk)
           this.clearAskKeyboards(chatId, pendingAsk)
           cancelled = true
         }
@@ -861,6 +897,21 @@ export class TelegramBridge {
     }
     if (data.startsWith(APPROVAL_CB)) {
       await this.handleApprovalCallback(chatId, cq.id, data)
+      return
+    }
+    if (data.startsWith(RETRY_CB)) {
+      await this.client.answerCallbackQuery(cq.id, 'Повторяю…')
+      await this.retryLastPrompt(chatId, data.slice(RETRY_CB.length))
+      return
+    }
+    if (data.startsWith(CONTINUE_CB)) {
+      await this.client.answerCallbackQuery(cq.id, 'Продолжаю…')
+      await this.followupSession(chatId, data.slice(CONTINUE_CB.length), MSG.CONTINUE_TEXT)
+      return
+    }
+    if (data.startsWith(NTF_HIST_CB)) {
+      await this.client.answerCallbackQuery(cq.id)
+      await this.sendHistoryPage(chatId, data.slice(NTF_HIST_CB.length))
       return
     }
     if (data === LAST_CB) {
@@ -1706,18 +1757,50 @@ export class TelegramBridge {
       await this.client.sendMessage(chatId, MSG.GONE)
       return
     }
+    this.deliverPrompt(chatId, binding.sessionId, agent, text)
+  }
+
+  /** Send text to an explicit session (notification buttons work across bindings). */
+  private async followupSession(chatId: number, sessionId: string, text: string): Promise<void> {
+    const agent = await this.ensureLiveAgent(sessionId)
+    if (!agent) {
+      await this.client.sendMessage(chatId, MSG.GONE)
+      return
+    }
+    this.deliverPrompt(chatId, sessionId, agent, text)
+  }
+
+  private deliverPrompt(chatId: number, sessionId: string, agent: Agent, text: string): void {
     const message = createUserMessage({
       content: [{ type: 'text', text }],
       source: { kind: 'user' },
     })
     // Busy feedback: mid-turn followups queue silently by design — tell the user.
-    const busy = this.busySessions.has(binding.sessionId)
+    const busy = this.busySessions.has(sessionId)
       || Boolean((agent as { phase?: { kind?: string } }).phase?.kind
         && (agent as { phase?: { kind?: string } }).phase?.kind !== 'idle')
     agent.followup(message)
+    if (text.trim().length > 0) this.lastPromptBySession.set(sessionId, text)
     if (busy) {
-      await this.enqueueNotice(chatId, 'В очереди: сообщение обработается после текущей задачи')
+      void this.enqueueNotice(chatId, 'В очереди: сообщение обработается после текущей задачи')
     }
+  }
+
+  /** /retry: re-send the last text prompt of this chat's session. */
+  private async retryLastPrompt(chatId: number, sessionId?: string): Promise<void> {
+    const binding = this.bindings.get(String(chatId))
+    const target = sessionId ?? binding?.sessionId
+    if (!target) {
+      await this.client.sendMessage(chatId, MSG.NEED_BIND)
+      return
+    }
+    const text = this.lastPromptBySession.get(target)
+    if (!text) {
+      await this.enqueueNotice(chatId, MSG.RETRY_NONE)
+      return
+    }
+    await this.followupSession(chatId, target, text)
+    await this.enqueueNotice(chatId, MSG.RETRY_SENT)
   }
 
   /**
@@ -1726,6 +1809,55 @@ export class TelegramBridge {
    * an unsupported media type (the user was already notified); otherwise the
    * caption text part (when present) followed by the image part.
    */
+  private isImageDocument(doc: NonNullable<TelegramMessage['document']>): boolean {
+    return typeof doc.mime_type === 'string' && IMAGE_MEDIA_TYPES.includes(doc.mime_type)
+  }
+
+  private isTextDocument(doc: NonNullable<TelegramMessage['document']>): boolean {
+    const mime = (doc.mime_type ?? '').toLowerCase()
+    if (mime.startsWith('text/') || TEXT_FILE_MIME_EXACT.includes(mime)) return true
+    const name = (doc.file_name ?? '').toLowerCase()
+    return TEXT_FILE_EXTENSIONS.some((ext) => name.endsWith(ext))
+  }
+
+  /**
+   * Download a text document and deliver it as prompt text (with the caption).
+   * Binary documents are refused with an explicit notice — they would arrive as
+   * mojibake, and there is no attachment seam for arbitrary files.
+   */
+  private async handleTextDocument(chatId: number, message: TelegramMessage): Promise<void> {
+    const doc = message.document
+    if (!doc) return
+    if (!this.isTextDocument(doc)) {
+      await this.enqueueNotice(chatId, MSG.FILE_UNSUPPORTED)
+      return
+    }
+    if (!this.bindings.has(String(chatId))) {
+      await this.client.sendMessage(chatId, MSG.NEED_BIND)
+      return
+    }
+    if ((doc.file_size ?? 0) > MAX_TEXT_FILE_BYTES) {
+      await this.enqueueNotice(chatId, MSG.FILE_TOO_LARGE(Math.floor(MAX_TEXT_FILE_BYTES / 1024)))
+      return
+    }
+    try {
+      const file = await this.client.getFile(doc.file_id)
+      if (!file.file_path) throw new Error('Telegram не вернул путь к файлу')
+      const bytes = await this.client.downloadFile(file.file_path)
+      if (bytes.length > MAX_TEXT_FILE_BYTES) {
+        await this.enqueueNotice(chatId, MSG.FILE_TOO_LARGE(Math.floor(MAX_TEXT_FILE_BYTES / 1024)))
+        return
+      }
+      const text = Buffer.from(bytes).toString('utf8')
+      const name = doc.file_name ?? 'файл'
+      const caption = message.caption?.trim()
+      const body = [caption, `${MSG.FILE_HEADER(name)}\n\`\`\`\n${text}\n\`\`\``].filter(Boolean).join('\n\n')
+      await this.followupBound(chatId, body)
+    } catch (err) {
+      await this.enqueueNotice(chatId, MSG.FILE_FAILED(this.redact(err)))
+    }
+  }
+
   private async collectMediaParts(chatId: number, message: TelegramMessage): Promise<WireContentPart[] | undefined> {
     const caption = message.caption?.trim()
     const textPart: WireContentPart | undefined = caption ? { type: 'text', text: caption } : undefined
@@ -1957,11 +2089,11 @@ export class TelegramBridge {
         const mode = this.notificationMode(chatId)
         if (mode === 'off') continue
         if (kind === 'error') {
-          this.enqueueNotice(chatId, `${this.describeTurnError(reason?.error)}\nСессия: ${label}`)
+          this.enqueueNotice(chatId, `${this.describeTurnError(reason?.error)}\nСессия: ${label}`, this.turnNoticeKeyboard(id, 'error'))
         } else if (kind === 'completed') {
-          if (mode === 'all') this.enqueueNotice(chatId, `✅ Сессия завершила работу — ${label}`)
+          if (mode === 'all') this.enqueueNotice(chatId, `✅ Сессия завершила работу — ${label}`, this.turnNoticeKeyboard(id, 'completed'))
         } else if (kind === 'max-tokens') {
-          this.enqueueNotice(chatId, `⚠️ Достигнут лимит выходных токенов — ход закрыт\nСессия: ${label}`)
+          this.enqueueNotice(chatId, `⚠️ Достигнут лимит выходных токенов — ход закрыт\nСессия: ${label}`, this.turnNoticeKeyboard(id, 'max-tokens'))
         } else if (kind === 'blocked') {
           this.enqueueNotice(chatId, `⛔ Ход заблокирован хостом (сессия в архиве или работа остановлена)\nСессия: ${label}`)
         } else if (kind === 'aborted') {
@@ -1978,7 +2110,6 @@ export class TelegramBridge {
       await this.flushReasoning(id)
       return
     }
-
     if (event.type === 'tool/call') {
       // Progress summary; ask_user is owned by the provider hook (avoids duplicates).
       const name = event.data?.name ?? 'tool'
@@ -2194,11 +2325,11 @@ export class TelegramBridge {
    * the blockquote entity at all and show the whole message as “not supported”.
    * Falls back to plain text when the send fails — a notice is never lost.
    */
-  private async deliverNotice(chatId: number, text: string): Promise<void> {
+  private async deliverNotice(chatId: number, text: string, keyboard?: InlineKeyboardMarkup): Promise<void> {
     const quoted = text.startsWith('> ')
     const body = quoted ? text.slice(2) : text
     try {
-      await this.withRetry(() => this.client.sendMessage(chatId, quoted ? `> ${body}` : body))
+      await this.withRetry(() => this.client.sendMessage(chatId, quoted ? `> ${body}` : body, undefined, keyboard))
       return
     } catch (err) {
       this.ctx.logger.error(this.redact(err))
@@ -2206,10 +2337,10 @@ export class TelegramBridge {
   }
 
   /** Serialized per-chat notice chain — bursts can't race into Telegram 429s. */
-  private enqueueNotice(chatId: number, text: string): Promise<void> {
+  private enqueueNotice(chatId: number, text: string, keyboard?: InlineKeyboardMarkup): Promise<void> {
     const key = String(chatId)
     const prev = this.noticeQueue.get(key) ?? Promise.resolve()
-    const next = prev.then(() => this.deliverNotice(chatId, text)).catch(() => {})
+    const next = prev.then(() => this.deliverNotice(chatId, text, keyboard)).catch(() => {})
     this.noticeQueue.set(key, next)
     return next
   }
@@ -2297,6 +2428,7 @@ export class TelegramBridge {
       for (const [chatId, p] of [...this.pendingAsks]) {
         if (p.ask !== ask) continue
         this.pendingAsks.delete(chatId)
+        this.clearAskReminder(p)
         this.clearAskKeyboards(Number(chatId), p)
       }
       rejectFn(new Error('ask aborted'))
@@ -2323,6 +2455,7 @@ export class TelegramBridge {
           final: questions.map(() => false),
         }
         this.pendingAsks.set(String(chatId), pending)
+        this.armAskReminder(chatId, pending)
         void this.offerAskChat(chatId, pending, label)
         asked = true
       }
@@ -2395,6 +2528,7 @@ export class TelegramBridge {
     for (const [chatId, p] of [...this.pendingAsks]) {
       if (p.req !== request) continue
       this.pendingAsks.delete(chatId)
+      this.clearAskReminder(p)
       if (!p.ask.answered) {
         this.clearAskKeyboards(Number(chatId), p)
         this.enqueueNotice(Number(chatId), 'На вопрос уже ответили в Web — канал ответов в TG закрыт')
@@ -2406,6 +2540,7 @@ export class TelegramBridge {
     for (const [chatId, pending] of [...this.pendingAsks]) {
       if (pending.req !== request) continue
       this.pendingAsks.delete(chatId)
+      this.clearAskReminder(pending)
       this.clearAskKeyboards(Number(chatId), pending)
     }
   }
@@ -2459,13 +2594,31 @@ export class TelegramBridge {
     }
   }
 
+  /** One gentle reminder; never repeats, never keeps the process alive. */
+  private armAskReminder(chatId: number, pending: TgPendingAsk): void {
+    const timer = setTimeout(() => {
+      if (this.pendingAsks.get(String(chatId)) !== pending || pending.ask.answered) return
+      void this.enqueueNotice(chatId, MSG.ASK_REMINDER(pending.questions.length))
+    }, ASK_REMINDER_MS)
+    timer.unref?.()
+    pending.reminder = timer
+  }
+
+  private clearAskReminder(pending: TgPendingAsk): void {
+    if (pending.reminder === undefined) return
+    clearTimeout(pending.reminder)
+    pending.reminder = undefined
+  }
+
   private async maybeResolveAsk(chatId: number, pending: TgPendingAsk): Promise<void> {
     if (pending.ask.answered) return
     if (!pending.questions.every((_, i) => pending.final[i])) return
+    this.clearAskReminder(pending)
     pending.ask.answered = true
     for (const [cid, p] of [...this.pendingAsks]) {
       if (p.ask !== pending.ask) continue
       this.pendingAsks.delete(cid)
+      this.clearAskReminder(p)
       if (cid !== String(chatId)) this.clearAskKeyboards(Number(cid), p)
     }
     const answers = pending.questions.map((q, i) => {
@@ -2606,9 +2759,11 @@ export class TelegramBridge {
       }
     }
     ask.answered = true
+    this.clearAskReminder(pending)
     for (const [cid, p] of [...this.pendingAsks]) {
       if (p.ask !== ask) continue
       this.pendingAsks.delete(cid)
+      this.clearAskReminder(p)
       if (cid !== String(chatId)) this.clearAskKeyboards(Number(cid), p)
     }
     this.clearAskKeyboards(chatId, pending)
@@ -2793,6 +2948,40 @@ export class TelegramBridge {
     }
     const raw = Number((arg ?? '').trim())
     await this.sendHistoryPage(chatId, binding.sessionId, Number.isFinite(raw) && raw > 0 ? raw : undefined)
+  }
+
+  /** /find <text>: search session titles and folders, then bind with a button. */
+  private async handleFindCommand(chatId: number, query?: string): Promise<void> {
+    const q = (query ?? '').trim()
+    if (q.length === 0) {
+      await this.client.sendMessage(chatId, MSG.FIND_USAGE)
+      return
+    }
+    const catalog = await this.resolveCatalog()
+    const needle = q.toLowerCase()
+    const rows = [...catalog.sessionsById.values()]
+      .filter((row) => !isArchived(catalog.archivedIds, row.sessionId) && !row.blank)
+      .filter((row) => (row.title ?? '').toLowerCase().includes(needle)
+        || (row.cwd ?? '').toLowerCase().includes(needle))
+      .sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0))
+      .slice(0, MAX_BUTTONS)
+    if (rows.length === 0) {
+      await this.client.sendMessage(chatId, MSG.FIND_NONE(q))
+      return
+    }
+    this.pickers.set(String(chatId), { workspaces: [], sessions: rows, catalog })
+    const keyboard: InlineKeyboardMarkup = {
+      inline_keyboard: rows.map((row, i) => ([{
+        text: truncateButton(this.sessionButtonText(row, i)),
+        callback_data: `${SID_CB}${i}`,
+      }])),
+    }
+    const body = [
+      MSG.FIND_HEADER(q, rows.length),
+      '',
+      ...rows.map((row, i) => `${i + 1}. ${row.title ?? row.sessionId}\n   ${row.cwd ?? ''}`),
+    ].join('\n')
+    await this.client.sendMessage(chatId, body, undefined, keyboard)
   }
 
   /** /new: create a session in the bound session's workspace and attach to it. */
@@ -3369,6 +3558,22 @@ export class TelegramBridge {
     } catch {
       // First run: no file yet.
     }
+  }
+
+  /** Inline actions on a turn/end notice: retry, continue, last answer, history. */
+  private turnNoticeKeyboard(sessionId: string, kind: 'error' | 'completed' | 'max-tokens'): InlineKeyboardMarkup | undefined {
+    const rows: Array<Array<{ text: string; callback_data: string }>> = []
+    if (kind === 'error' && this.lastPromptBySession.has(sessionId)) {
+      rows.push([{ text: MSG.RETRY_BUTTON, callback_data: `${RETRY_CB}${sessionId}` }])
+    }
+    if (kind === 'max-tokens') {
+      rows.push([{ text: MSG.CONTINUE_BUTTON, callback_data: `${CONTINUE_CB}${sessionId}` }])
+    }
+    rows.push([{ text: MSG.NTF_LAST_BUTTON, callback_data: LAST_CB }])
+    if (kind === 'completed') {
+      rows.push([{ text: MSG.NTF_HIST_BUTTON, callback_data: `${NTF_HIST_CB}${sessionId}` }])
+    }
+    return { inline_keyboard: rows }
   }
 
   private redact(value: unknown): string {

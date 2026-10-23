@@ -1220,7 +1220,7 @@ test('image document (png) is admitted with its file name', async () => {
   assert.equal(image?.name, 'screenshot.png')
 })
 
-test('non-image document gets MEDIA_UNSUPPORTED and no prompt', async () => {
+test('non-text document gets FILE_UNSUPPORTED and no prompt', async () => {
   const sent: SentMessage[] = []
   const prompts: PromptPayload[] = []
   const sessionId = 'live-img-pdf'
@@ -1245,7 +1245,7 @@ test('non-image document gets MEDIA_UNSUPPORTED and no prompt', async () => {
     },
   })
   assert.equal(prompts.length, 0, 'no prompt dispatched')
-  assert.ok(sent.some((m) => m.text === MSG.MEDIA_UNSUPPORTED), 'unsupported notice sent')
+  assert.ok(sent.some((m) => m.text === MSG.FILE_UNSUPPORTED), 'unsupported file notice sent')
 })
 
 test('album photos collapse into a single prompt with all images', async () => {
@@ -1675,5 +1675,161 @@ test('approval request offers allow/deny buttons', async () => {
 
   await bridge.processUpdate(callbackUpdate(10, 1, 'ap:1', 2))
   assert.equal(await pending, 'allowed-once')
+  await bridge.stop()
+})
+
+test('text document is delivered to the session as prompt text', async () => {
+  const sent: SentMessage[] = []
+  const followups: UserMessage[] = []
+  const sessionId = 'live-doc-text'
+  const agent = makeAgent(sessionId, followups)
+  const ctx = {
+    logger: { info() {}, warn() {}, error() {} },
+    agents: {
+      list: () => [agent],
+      roots: () => [agent],
+      get: (id: ReturnType<typeof SessionId>) => (String(id) === sessionId ? agent : undefined),
+    },
+    on() { return () => {} },
+  }
+  const bridge = new TelegramBridge(ctx as any, {
+    token: 't',
+    allowedUserIds: [1],
+    allowAllUsers: false,
+    client: fakeClient(sent, {
+      getFile: async (fileId: string) => ({ file_id: fileId, file_unique_id: fileId, file_path: `path/${fileId}` }),
+      downloadFile: async () => new TextEncoder().encode('# Заметка\nтекст файла'),
+    }),
+    sleep: async () => {},
+  })
+  startTestBridge(bridge)
+  await bridge.processUpdate(bindUpdate(10, 1, sessionId))
+  sent.length = 0
+
+  await bridge.processUpdate({
+    update_id: 3,
+    message: {
+      message_id: 3,
+      date: 0,
+      chat: { id: 10, type: 'private' },
+      from: { id: 1 },
+      caption: 'посмотри',
+      document: {
+        file_id: 'doc-note',
+        file_unique_id: 'doc-note',
+        file_name: 'note.md',
+        mime_type: 'text/markdown',
+        file_size: 20,
+      },
+    },
+  })
+  assert.equal(followups.length, 1, 'document became one prompt')
+  const body = JSON.stringify(followups[0])
+  assert.match(body, /note\.md/)
+  assert.match(body, /Заметка/)
+  assert.match(body, /посмотри/)
+  await bridge.stop()
+})
+
+test('turn/end error offers a retry button, and /retry resends the last prompt', async () => {
+  const sent: SentMessage[] = []
+  const followups: UserMessage[] = []
+  const sessionId = 'live-turn-retry'
+  const agent = makeAgent(sessionId, followups)
+  let listener: ((session: { id: ReturnType<typeof SessionId> }, event: unknown) => void) | undefined
+  const ctx = {
+    logger: { info() {}, warn() {}, error() {} },
+    agents: {
+      list: () => [agent],
+      roots: () => [agent],
+      get: (id: ReturnType<typeof SessionId>) => (String(id) === sessionId ? agent : undefined),
+    },
+    on(event: string, handler: typeof listener) {
+      if (event === 'session/event') listener = handler
+      return () => {}
+    },
+  }
+  const bridge = new TelegramBridge(ctx as any, {
+    token: 't',
+    allowedUserIds: [1],
+    allowAllUsers: false,
+    client: fakeClient(sent),
+    sleep: async () => {},
+  })
+  startTestBridge(bridge)
+  await bridge.processUpdate(bindUpdate(10, 1, sessionId))
+  await bridge.processUpdate(messageUpdate(10, 1, 'сделай отчёт', 2))
+  assert.equal(followups.length, 1, 'the prompt reached the agent')
+  sent.length = 0
+
+  listener!({ id: SessionId(sessionId) }, {
+    type: 'turn/end',
+    data: { reason: { kind: 'error', error: { message: 'boom' } } },
+  })
+  await new Promise<void>((resolve) => setTimeout(resolve, 20))
+  const notice = sent.find((message) =>
+    message.replyMarkup?.inline_keyboard?.some((row) =>
+      row.some((button) => button.callback_data === `nt:retry:${sessionId}`)))
+  assert.ok(notice, 'error notice carries the retry button')
+  assert.ok(sent.some((message) => message.text.includes('boom')))
+
+  await bridge.processUpdate(callbackUpdate(10, 1, `nt:retry:${sessionId}`, 3))
+  await new Promise<void>((resolve) => setTimeout(resolve, 20))
+  assert.equal(followups.length, 2, 'retry button resends the prompt')
+
+  await bridge.processUpdate(messageUpdate(10, 1, '/retry', 4))
+  assert.equal(followups.length, 3, '/retry resends the prompt too')
+  await bridge.stop()
+})
+
+test('/find searches session titles and offers bind buttons', async () => {
+  const sent: SentMessage[] = []
+  const ctx = {
+    logger: { info() {}, warn() {}, error() {} },
+    agents: { list: () => [], roots: () => [], get: () => undefined },
+    apiProxy: {
+      workspace: {
+        list: async () => rpcOk({
+          items: [{ workspaceId: 'w1', path: '/proj/demo', title: 'Демо', sessionIds: ['s1', 's2'] }],
+          archivedSessionIds: [],
+        }),
+      },
+      sessions: {
+        list: async () => rpcOk({
+          items: [
+            {
+              sessionId: 's1',
+              updatedAt: 2,
+              running: false,
+              blank: false,
+              cwd: '/proj/demo',
+              projections: { values: { title: 'Демо-сессия' } },
+            },
+            {
+              sessionId: 's2',
+              updatedAt: 3,
+              running: false,
+              blank: false,
+              cwd: '/proj/other',
+              projections: { values: { title: 'Другая работа' } },
+            },
+          ],
+        }),
+      },
+    },
+    on() { return () => {} },
+  }
+  const bridge = new TelegramBridge(ctx as any, {
+    token: 't',
+    allowedUserIds: [1],
+    allowAllUsers: false,
+    client: fakeClient(sent),
+    sleep: async () => {},
+  })
+  await bridge.processUpdate(messageUpdate(10, 1, '/find демо'))
+  assert.equal(sent.length, 1)
+  assert.match(sent[0]!.text, /Найдено сессий: 1/)
+  assert.match(sent[0]!.text, /Демо-сессия/)
+  assert.equal(sent[0]!.replyMarkup?.inline_keyboard?.[0]?.[0]?.callback_data, 'sid:0')
   await bridge.stop()
 })

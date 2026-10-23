@@ -77,6 +77,21 @@ export declare const MSG: {
     readonly APPROVAL_ALLOWED: (tool: string) => string;
     readonly APPROVAL_REJECTED: "Запуск инструмента отклонён";
     readonly APPROVAL_CLOSED: "Это разрешение уже закрыто";
+    readonly ASK_REMINDER: (n: number) => string;
+    readonly RETRY_NONE: "Нечего повторять: в этом чате ещё не было отправленного запроса.";
+    readonly RETRY_SENT: "🔁 Повторяю последний запрос…";
+    readonly RETRY_BUTTON: "🔁 Повторить";
+    readonly CONTINUE_BUTTON: "▶ Продолжить";
+    readonly CONTINUE_TEXT: "Продолжай с того места, где остановился.";
+    readonly NTF_LAST_BUTTON: "📜 Последний ответ";
+    readonly NTF_HIST_BUTTON: "📖 История";
+    readonly FIND_USAGE: "Использование: /find <текст> — поиск сессий по названию или папке";
+    readonly FIND_NONE: (q: string) => string;
+    readonly FIND_HEADER: (q: string, n: number) => string;
+    readonly FILE_UNSUPPORTED: "Этот файл не текстовый — не могу прочитать. Текст (txt/md/json/код) можно отправлять как документ; остальное — через Web.";
+    readonly FILE_TOO_LARGE: (limitKb: number) => string;
+    readonly FILE_FAILED: (detail?: string) => string;
+    readonly FILE_HEADER: (name: string) => string;
     readonly unknown: (command: string) => string;
 };
 export type ParsedCommand = {
@@ -145,6 +160,13 @@ export type ParsedCommand = {
     text: string;
     arg?: string;
 } | {
+    type: 'retry';
+    text: string;
+} | {
+    type: 'find';
+    text: string;
+    arg?: string;
+} | {
     type: 'unknown';
     command: string;
     text: string;
@@ -161,3 +183,9 @@ export declare const LAST_CB = "last";
 export declare const ASK_CB = "q:";
 /** Inline button: resolve an approval request (`ap:1` allow once, `ap:0` reject). */
 export declare const APPROVAL_CB = "ap:";
+/** Inline button: retry the last prompt of a session (`nt:retry:<sessionId>`). */
+export declare const RETRY_CB = "nt:retry:";
+/** Inline button: continue a max-tokens-stopped turn (`nt:continue:<sessionId>`). */
+export declare const CONTINUE_CB = "nt:continue:";
+/** Inline button: history of a session from a notification (`nt:hist:<sessionId>`). */
+export declare const NTF_HIST_CB = "nt:hist:";
