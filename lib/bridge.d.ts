@@ -277,12 +277,27 @@ export declare class TelegramBridge {
      */
     private onUserQuestionRequest;
     private registerTgAsk;
+    /** Send one message per question, each with its own inline keyboard. */
+    private offerAskChat;
+    /** `A. label ✓` buttons; multiSelect adds «Готово», every question adds «Свой ответ». */
+    private askKeyboard;
+    private formatAskQuestion;
     private settleGuiSide;
     private discardTgAsk;
-    private formatAskPending;
+    /** Answer arrives from a button or a typed answer: mark the message, check completion. */
+    private markAskAnswered;
+    private refreshAskKeyboard;
+    /** Drop inline keyboards that can no longer be used (answered in Web, /cancel, abort). */
+    private clearAskKeyboards;
+    private maybeResolveAsk;
+    private handleAskCallback;
+    /** Text typed after «✏️ Свой ответ» answers exactly that question. */
+    private handleAskCustomText;
     private handleTgAnswer;
     private onApprovalRequest;
     private handleTgApproval;
+    private clearApprovalKeyboard;
+    private handleApprovalCallback;
     private stopBound;
     private sendMission;
     /** /history [beforeSeq]: показать предыдущие сообщения сессии. */

@@ -61,6 +61,18 @@ function messageUpdate(chatId: number, userId: number, text: string, updateId = 
   }
 }
 
+function callbackUpdate(chatId: number, userId: number, data: string, updateId = 2): TelegramUpdate {
+  return {
+    update_id: updateId,
+    callback_query: {
+      id: `cq-${updateId}`,
+      from: { id: userId },
+      message: { message_id: 1, date: 0, chat: { id: chatId, type: 'private' } },
+      data,
+    },
+  }
+}
+
 function startTestBridge(bridge: TelegramBridge): void {
   const persistence = bridge as unknown as { loadBindings: () => void; saveBindings: () => void }
   persistence.loadBindings = () => {}
@@ -1475,5 +1487,193 @@ test('user-questions/request announces when the Web answer wins', async () => {
 
   await bridge.processUpdate(messageUpdate(10, 1, 'follow-up', 2))
   assert.equal(followups.length, 1, 'the answered question is removed from the Telegram pending state')
+  await bridge.stop()
+})
+
+test('ask_user_question offers option buttons and a button click answers it', async () => {
+  const sent: SentMessage[] = []
+  const sessionId = 'live-question-buttons'
+  const agent = makeAgent(sessionId, [])
+  let questionHook: ((request: unknown, next: () => Promise<unknown>) => Promise<unknown>) | undefined
+  const ctx = {
+    logger: { info() {}, warn() {}, error() {} },
+    agents: {
+      list: () => [agent],
+      roots: () => [agent],
+      get: (id: ReturnType<typeof SessionId>) => (String(id) === sessionId ? agent : undefined),
+    },
+    on(event: string, listener: (...args: any[]) => unknown) {
+      if (event === 'user-questions/request') questionHook = listener as typeof questionHook
+      return () => {}
+    },
+  }
+  const bridge = new TelegramBridge(ctx as any, {
+    token: 't',
+    allowedUserIds: [1],
+    allowAllUsers: false,
+    client: fakeClient(sent),
+    sleep: async () => new Promise<void>((resolve) => setTimeout(resolve, 1)),
+  })
+  startTestBridge(bridge)
+  await bridge.processUpdate(bindUpdate(10, 1, sessionId))
+  sent.length = 0
+
+  assert.ok(questionHook)
+  const answer = questionHook!({
+    agent,
+    questions: [{
+      id: 'mode',
+      question: 'Pick a mode',
+      options: [{ label: 'Fast' }, { label: 'Careful', description: 'slow but safe' }],
+    }],
+  }, () => Promise.reject(new Error('NO_PROVIDER')))
+  await new Promise<void>((resolve) => setImmediate(resolve))
+
+  const prompt = sent.find((message) => message.text.includes('Pick a mode'))
+  assert.ok(prompt, 'the question is offered to Telegram')
+  assert.equal(prompt!.replyMarkup?.inline_keyboard?.[0]?.[0]?.callback_data, 'q:0:0')
+  assert.equal(prompt!.replyMarkup?.inline_keyboard?.[1]?.[0]?.callback_data, 'q:0:1')
+  assert.equal(prompt!.replyMarkup?.inline_keyboard?.[2]?.[0]?.text, MSG.ASK_CUSTOM_BUTTON)
+
+  await bridge.processUpdate(callbackUpdate(10, 1, 'q:0:1', 2))
+  assert.deepEqual(await answer, { answers: [{ id: 'mode', selected: ['Careful'] }] })
+  await bridge.stop()
+})
+
+test('ask_user_question «Свой ответ» waits for the next text message', async () => {
+  const sent: SentMessage[] = []
+  const sessionId = 'live-question-custom'
+  const agent = makeAgent(sessionId, [])
+  let questionHook: ((request: unknown, next: () => Promise<unknown>) => Promise<unknown>) | undefined
+  const ctx = {
+    logger: { info() {}, warn() {}, error() {} },
+    agents: {
+      list: () => [agent],
+      roots: () => [agent],
+      get: (id: ReturnType<typeof SessionId>) => (String(id) === sessionId ? agent : undefined),
+    },
+    on(event: string, listener: (...args: any[]) => unknown) {
+      if (event === 'user-questions/request') questionHook = listener as typeof questionHook
+      return () => {}
+    },
+  }
+  const bridge = new TelegramBridge(ctx as any, {
+    token: 't',
+    allowedUserIds: [1],
+    allowAllUsers: false,
+    client: fakeClient(sent),
+    sleep: async () => new Promise<void>((resolve) => setTimeout(resolve, 1)),
+  })
+  startTestBridge(bridge)
+  await bridge.processUpdate(bindUpdate(10, 1, sessionId))
+  sent.length = 0
+
+  assert.ok(questionHook)
+  const answer = questionHook!({
+    agent,
+    questions: [{ id: 'mode', question: 'Pick a mode', options: [{ label: 'Fast' }] }],
+  }, () => Promise.reject(new Error('NO_PROVIDER')))
+  await new Promise<void>((resolve) => setImmediate(resolve))
+
+  await bridge.processUpdate(callbackUpdate(10, 1, 'q:0:c', 2))
+  await new Promise<void>((resolve) => setImmediate(resolve))
+  assert.ok(sent.some((message) => message.text === MSG.ASK_CUSTOM_PROMPT(1)))
+
+  await bridge.processUpdate(messageUpdate(10, 1, 'мой вариант', 3))
+  assert.deepEqual(await answer, { answers: [{ id: 'mode', selected: [], custom: 'мой вариант' }] })
+  await bridge.stop()
+})
+
+test('ask_user_question multiSelect collects toggles until «Готово»', async () => {
+  const sent: SentMessage[] = []
+  const sessionId = 'live-question-multi'
+  const agent = makeAgent(sessionId, [])
+  let questionHook: ((request: unknown, next: () => Promise<unknown>) => Promise<unknown>) | undefined
+  const ctx = {
+    logger: { info() {}, warn() {}, error() {} },
+    agents: {
+      list: () => [agent],
+      roots: () => [agent],
+      get: (id: ReturnType<typeof SessionId>) => (String(id) === sessionId ? agent : undefined),
+    },
+    on(event: string, listener: (...args: any[]) => unknown) {
+      if (event === 'user-questions/request') questionHook = listener as typeof questionHook
+      return () => {}
+    },
+  }
+  const bridge = new TelegramBridge(ctx as any, {
+    token: 't',
+    allowedUserIds: [1],
+    allowAllUsers: false,
+    client: fakeClient(sent),
+    sleep: async () => new Promise<void>((resolve) => setTimeout(resolve, 1)),
+  })
+  startTestBridge(bridge)
+  await bridge.processUpdate(bindUpdate(10, 1, sessionId))
+  sent.length = 0
+
+  assert.ok(questionHook)
+  const answer = questionHook!({
+    agent,
+    questions: [{
+      id: 'modes',
+      question: 'Pick modes',
+      multiSelect: true,
+      options: [{ label: 'Fast' }, { label: 'Careful' }],
+    }],
+  }, () => Promise.reject(new Error('NO_PROVIDER')))
+  await new Promise<void>((resolve) => setImmediate(resolve))
+
+  const prompt = sent.find((message) => message.text.includes('Pick modes'))
+  assert.ok(prompt)
+  assert.equal(prompt!.replyMarkup?.inline_keyboard?.[2]?.[0]?.text, MSG.ASK_CUSTOM_BUTTON)
+  assert.equal(prompt!.replyMarkup?.inline_keyboard?.[3]?.[0]?.callback_data, 'q:0:d')
+
+  await bridge.processUpdate(callbackUpdate(10, 1, 'q:0:0', 2))
+  await bridge.processUpdate(callbackUpdate(10, 1, 'q:0:1', 3))
+  await bridge.processUpdate(callbackUpdate(10, 1, 'q:0:d', 4))
+  assert.deepEqual(await answer, { answers: [{ id: 'modes', selected: ['Fast', 'Careful'] }] })
+  await bridge.stop()
+})
+
+test('approval request offers allow/deny buttons', async () => {
+  const sent: SentMessage[] = []
+  const sessionId = 'live-approval-buttons'
+  const agent = makeAgent(sessionId, [])
+  let approvalHook: ((req: unknown, next: () => Promise<string>) => Promise<string>) | undefined
+  const ctx = {
+    logger: { info() {}, warn() {}, error() {} },
+    agents: {
+      list: () => [agent],
+      roots: () => [agent],
+      get: (id: ReturnType<typeof SessionId>) => (String(id) === sessionId ? agent : undefined),
+    },
+    on(event: string, listener: (...args: any[]) => unknown) {
+      if (event === 'approval/request') approvalHook = listener as typeof approvalHook
+      return () => {}
+    },
+  }
+  const bridge = new TelegramBridge(ctx as any, {
+    token: 't',
+    allowedUserIds: [1],
+    allowAllUsers: false,
+    client: fakeClient(sent),
+    sleep: async () => new Promise<void>((resolve) => setTimeout(resolve, 1)),
+  })
+  startTestBridge(bridge)
+  await bridge.processUpdate(bindUpdate(10, 1, sessionId))
+  sent.length = 0
+
+  assert.ok(approvalHook, 'approval/request hook registered')
+  const pending = approvalHook!({ agent, toolName: 'write_file' }, () => new Promise<string>(() => {}))
+  await new Promise<void>((resolve) => setImmediate(resolve))
+
+  const prompt = sent.find((message) => message.text.includes('write_file'))
+  assert.ok(prompt, 'the approval prompt is sent')
+  assert.equal(prompt!.replyMarkup?.inline_keyboard?.[0]?.[0]?.callback_data, 'ap:1')
+  assert.equal(prompt!.replyMarkup?.inline_keyboard?.[0]?.[1]?.callback_data, 'ap:0')
+
+  await bridge.processUpdate(callbackUpdate(10, 1, 'ap:1', 2))
+  assert.equal(await pending, 'allowed-once')
   await bridge.stop()
 })

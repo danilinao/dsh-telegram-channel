@@ -59,6 +59,24 @@ export declare const MSG: {
     readonly REASONING_STATE: (on: boolean) => string;
     readonly REASONING_SET: (on: boolean) => string;
     readonly MODEL_FAILED: (detail?: string) => string;
+    readonly ASK_HEADER: "❓ Сессия задала вопрос и ждёт ответа";
+    readonly ASK_HINT: "Выберите вариант кнопкой ниже, нажмите «✏️ Свой ответ» или просто напишите ответ текстом; /cancel — закрыть ответы в TG.";
+    readonly ASK_OPEN: "(открытый вопрос — просто введите ответ)";
+    readonly ASK_CUSTOM_BUTTON: "✏️ Свой ответ";
+    readonly ASK_DONE_BUTTON: "✅ Готово";
+    readonly ASK_CUSTOM_PROMPT: (n: number) => string;
+    readonly ASK_ANSWERED: "Ответ отправлен";
+    readonly ASK_CLOSED: "Вопрос уже закрыт";
+    readonly ASK_ALREADY: "На этот вопрос уже ответили";
+    readonly ASK_NONE_SELECTED: "Ничего не выбрано — отметьте варианты, затем «✅ Готово»";
+    readonly ASK_MULTI_TIP: "Можно выбрать несколько — отметьте варианты и нажмите «✅ Готово».";
+    readonly APPROVAL_HEADER: "Запрос разрешения";
+    readonly APPROVAL_ALLOW_BUTTON: "✅ Разрешить";
+    readonly APPROVAL_DENY_BUTTON: "⛔ Отклонить";
+    readonly APPROVAL_TIP: "Кнопки ниже; можно и текстом: [A] — разрешить один раз, [B] — отклонить. /cancel — закрыть в TG.";
+    readonly APPROVAL_ALLOWED: (tool: string) => string;
+    readonly APPROVAL_REJECTED: "Запуск инструмента отклонён";
+    readonly APPROVAL_CLOSED: "Это разрешение уже закрыто";
     readonly unknown: (command: string) => string;
 };
 export type ParsedCommand = {
@@ -139,3 +157,7 @@ export declare function parseCommand(text: string): ParsedCommand;
 export declare const BIND_CB_PREFIX = "bind:";
 /** Inline button: fetch last Q/A for the bound session. */
 export declare const LAST_CB = "last";
+/** Inline button: answer one ask_user_question (`q:<question>:<option|d|c>`). */
+export declare const ASK_CB = "q:";
+/** Inline button: resolve an approval request (`ap:1` allow once, `ap:0` reject). */
+export declare const APPROVAL_CB = "ap:";

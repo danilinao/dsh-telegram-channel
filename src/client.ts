@@ -105,6 +105,20 @@ export interface TelegramClientLike {
     parseMode?: string,
     replyMarkup?: InlineKeyboardMarkup,
   ): Promise<TelegramMessage>
+  /** Rewrite a sent message (used to mark an answered question). */
+  editMessageText?(
+    chatId: number,
+    messageId: number,
+    text: string,
+    parseMode?: string,
+    replyMarkup?: InlineKeyboardMarkup | null,
+  ): Promise<TelegramMessage | boolean>
+  /** Replace/remove the inline keyboard of a sent message. */
+  editMessageReplyMarkup?(
+    chatId: number,
+    messageId: number,
+    replyMarkup?: InlineKeyboardMarkup | null,
+  ): Promise<boolean>
   sendRichMessage(chatId: number, markdown: string): Promise<TelegramMessage>
   sendChatAction(chatId: number, action: string): Promise<boolean>
   answerCallbackQuery(callbackQueryId: string, text?: string): Promise<boolean>
@@ -222,6 +236,31 @@ export class TelegramClient implements TelegramClientLike {
       body.reply_markup = replyMarkup
     }
     return this.call<TelegramMessage>('sendMessage', body)
+  }
+
+  async editMessageText(
+    chatId: number,
+    messageId: number,
+    text: string,
+    parseMode?: string,
+    replyMarkup?: InlineKeyboardMarkup | null,
+  ): Promise<TelegramMessage | boolean> {
+    const body: Record<string, unknown> = { chat_id: chatId, message_id: messageId, text }
+    if (parseMode !== undefined) body.parse_mode = parseMode
+    if (replyMarkup !== undefined) body.reply_markup = replyMarkup ?? { inline_keyboard: [] }
+    return this.call<TelegramMessage | boolean>('editMessageText', body)
+  }
+
+  async editMessageReplyMarkup(
+    chatId: number,
+    messageId: number,
+    replyMarkup?: InlineKeyboardMarkup | null,
+  ): Promise<boolean> {
+    return this.call<boolean>('editMessageReplyMarkup', {
+      chat_id: chatId,
+      message_id: messageId,
+      reply_markup: replyMarkup ?? { inline_keyboard: [] },
+    })
   }
 
   async sendRichMessage(chatId: number, markdown: string): Promise<TelegramMessage> {

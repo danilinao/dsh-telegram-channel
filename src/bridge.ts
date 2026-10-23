@@ -32,7 +32,7 @@ import {
   type TelegramMessage,
   type TelegramUpdate,
 } from './client.js'
-import { MSG, LAST_CB, parseCommand } from './commands.js'
+import { MSG, LAST_CB, ASK_CB, APPROVAL_CB, parseCommand } from './commands.js'
 import { escapeHtml, markdownToHtml, splitMessage } from './format.js'
 import { splitRichMarkdown } from './rich-format.js'
 import { formatLastTurn, loadLastTurn } from './history.js'
@@ -124,12 +124,23 @@ interface TgPendingAsk {
   questions: TgQuestionItem[]
   ask: TgAnswerHandle
   at: number
+  /** Telegram message id per question (inline keyboards are edited in place). */
+  messageIds: Array<number | undefined>
+  /** Selected option labels per question (button answers). */
+  selected: string[][]
+  /** Typed free-form answer per question. */
+  custom: Array<string | undefined>
+  /** Question already answered (button, «Готово» or typed custom answer). */
+  final: boolean[]
+  /** Question index whose "✏️ Свой ответ" is waiting for the next text message. */
+  awaitingCustom?: number
 }
 
 /** chatId → pending approval request mirrored to Telegram. */
 interface TgPendingApproval {
   toolName: string
   ask: TgAnswerHandle
+  messageId?: number
 }
 
 /** Structural view of the user-questions seam (types live in the host's dsh-user-questions package). */
@@ -783,8 +794,18 @@ export class TelegramBridge {
       case 'cancel': {
         // /cancel closes the TG-side answer/approval channel; the UI side stays open.
         let cancelled = false
-        if (this.pendingApprovalsTG.delete(String(chatId))) cancelled = true
-        if (this.pendingAsks.delete(String(chatId))) cancelled = true
+        const approval = this.pendingApprovalsTG.get(String(chatId))
+        if (approval) {
+          this.pendingApprovalsTG.delete(String(chatId))
+          this.clearApprovalKeyboard(chatId, approval)
+          cancelled = true
+        }
+        const pendingAsk = this.pendingAsks.get(String(chatId))
+        if (pendingAsk) {
+          this.pendingAsks.delete(String(chatId))
+          this.clearAskKeyboards(chatId, pendingAsk)
+          cancelled = true
+        }
         if (cancelled)
           await this.enqueueNotice(chatId, 'Ответы/подтверждения в Telegram закрыты (в Web вопрос по-прежнему доступен)')
         else
@@ -803,7 +824,11 @@ export class TelegramBridge {
         }
         const pending = this.pendingAsks.get(String(chatId))
         if (pending) {
-          await this.handleTgAnswer(chatId, pending, parsed.text)
+          if (pending.awaitingCustom !== undefined) {
+            await this.handleAskCustomText(chatId, pending, parsed.text)
+          } else {
+            await this.handleTgAnswer(chatId, pending, parsed.text)
+          }
           return
         }
         await this.followupBound(chatId, parsed.text)
@@ -830,6 +855,14 @@ export class TelegramBridge {
     const data = cq.data ?? ''
     const picker = this.pickers.get(String(chatId))
 
+    if (data.startsWith(ASK_CB)) {
+      await this.handleAskCallback(chatId, cq.id, data)
+      return
+    }
+    if (data.startsWith(APPROVAL_CB)) {
+      await this.handleApprovalCallback(chatId, cq.id, data)
+      return
+    }
     if (data === LAST_CB) {
       await this.client.answerCallbackQuery(cq.id)
       await this.sendLastTurn(chatId)
@@ -2261,8 +2294,10 @@ export class TelegramBridge {
     const sessionId = req.agent?.id !== undefined ? String(req.agent.id) : undefined
     const questions = Array.isArray(req.questions) ? req.questions : []
     const onAbort = (): void => {
-      for (const [chatId, p] of this.pendingAsks) {
-        if (p.ask === ask) this.pendingAsks.delete(chatId)
+      for (const [chatId, p] of [...this.pendingAsks]) {
+        if (p.ask !== ask) continue
+        this.pendingAsks.delete(chatId)
+        this.clearAskKeyboards(Number(chatId), p)
       }
       rejectFn(new Error('ask aborted'))
     }
@@ -2276,8 +2311,19 @@ export class TelegramBridge {
       let asked = false
       for (const chatId of this.lifecycleTargets(sessionId)) {
         if (this.notificationMode(chatId) === 'off') continue
-        this.pendingAsks.set(String(chatId), { req: request, sessionId, questions, ask, at: Date.now() })
-        this.enqueueNotice(chatId, `${this.formatAskPending(questions)}\nСессия: ${label}`)
+        const pending: TgPendingAsk = {
+          req: request,
+          sessionId,
+          questions,
+          ask,
+          at: Date.now(),
+          messageIds: questions.map(() => undefined),
+          selected: questions.map(() => []),
+          custom: questions.map(() => undefined),
+          final: questions.map(() => false),
+        }
+        this.pendingAsks.set(String(chatId), pending)
+        void this.offerAskChat(chatId, pending, label)
         asked = true
       }
       if (asked) return { promise, reject: rejectFn }
@@ -2286,11 +2332,71 @@ export class TelegramBridge {
     return { promise, reject: rejectFn }
   }
 
+  /** Send one message per question, each with its own inline keyboard. */
+  private async offerAskChat(chatId: number, pending: TgPendingAsk, label: string): Promise<void> {
+    for (let i = 0; i < pending.questions.length; i++) {
+      if (pending.ask.answered || !this.pendingAsks.has(String(chatId))) return
+      try {
+        const keyboard = this.askKeyboard(pending, i)
+        const message = await this.client.sendMessage(
+          chatId,
+          this.formatAskQuestion(pending.questions, i, label),
+          undefined,
+          keyboard,
+        )
+        pending.messageIds[i] = message?.message_id
+      } catch (err) {
+        this.ctx.logger.warn(`dsh-telegram-channel: ask prompt failed: ${this.redact(err)}`)
+      }
+    }
+  }
+
+  /** `A. label ✓` buttons; multiSelect adds «Готово», every question adds «Свой ответ». */
+  private askKeyboard(pending: TgPendingAsk, index: number): InlineKeyboardMarkup | undefined {
+    const opts = Array.isArray(pending.questions[index]?.options) ? pending.questions[index]!.options! : []
+    if (opts.length === 0) return undefined
+    const chosen = pending.selected[index] ?? []
+    const rows = opts.map((option, j) => ([{
+      text: truncateButton(`${String.fromCharCode(65 + j)}. ${option.label}${chosen.includes(option.label) ? ' ✓' : ''}`),
+      callback_data: `${ASK_CB}${index}:${j}`,
+    }]))
+    rows.push([{ text: MSG.ASK_CUSTOM_BUTTON, callback_data: `${ASK_CB}${index}:c` }])
+    if (pending.questions[index]?.multiSelect) {
+      rows.push([{ text: MSG.ASK_DONE_BUTTON, callback_data: `${ASK_CB}${index}:d` }])
+    }
+    return { inline_keyboard: rows }
+  }
+
+  private formatAskQuestion(questions: TgQuestionItem[], index: number, label: string): string {
+    const q = questions[index]!
+    const multi = questions.length > 1
+    const lines: string[] = []
+    if (index === 0) {
+      lines.push(`${MSG.ASK_HEADER}${multi ? ` (вопросов: ${questions.length})` : ''}`)
+      lines.push(`Сессия: ${label}`)
+      lines.push('')
+    } else {
+      lines.push(`❓ Вопрос ${index + 1}/${questions.length} · ${label}`)
+      lines.push('')
+    }
+    lines.push(`${multi ? `Q${index + 1}. ` : ''}${q.question ?? ''}`)
+    const opts = Array.isArray(q.options) ? q.options : []
+    if (opts.length === 0) {
+      lines.push(`  ${MSG.ASK_OPEN}`)
+    } else {
+      opts.forEach((o, j) => lines.push(`  [${String.fromCharCode(65 + j)}] ${o.label}${o.description ? ` — ${o.description}` : ''}`))
+      if (q.multiSelect) lines.push(`  ${MSG.ASK_MULTI_TIP}`)
+    }
+    if (index === 0) lines.push(MSG.ASK_HINT)
+    return lines.join('\n')
+  }
+
   private settleGuiSide(request: unknown): void {
     for (const [chatId, p] of [...this.pendingAsks]) {
       if (p.req !== request) continue
       this.pendingAsks.delete(chatId)
       if (!p.ask.answered) {
+        this.clearAskKeyboards(Number(chatId), p)
         this.enqueueNotice(Number(chatId), 'На вопрос уже ответили в Web — канал ответов в TG закрыт')
       }
     }
@@ -2298,24 +2404,159 @@ export class TelegramBridge {
 
   private discardTgAsk(request: unknown): void {
     for (const [chatId, pending] of [...this.pendingAsks]) {
-      if (pending.req === request) this.pendingAsks.delete(chatId)
+      if (pending.req !== request) continue
+      this.pendingAsks.delete(chatId)
+      this.clearAskKeyboards(Number(chatId), pending)
     }
   }
 
-  private formatAskPending(questions: TgQuestionItem[]): string {
-    const lines = ['❓ Сессия задала вопрос и ждёт ответа', 'Ответьте буквой варианта или введите свой ответ; /cancel — закрыть ответы в TG']
-    questions.forEach((q, i) => {
-      const prefix = questions.length > 1 ? `Q${i + 1}. ` : ''
-      lines.push(`${prefix}${q.question ?? ''}`)
-      const opts = Array.isArray(q.options) ? q.options : []
-      if (opts.length === 0) {
-        lines.push('  (открытый вопрос — просто введите ответ)')
-      } else {
-        opts.forEach((o, j) => lines.push(`  [${String.fromCharCode(65 + j)}] ${o.label}${o.description ? ` — ${o.description}` : ''}`))
-        if (q.multiSelect) lines.push('  (можно несколько, например: A,B)')
-      }
+  /** Answer arrives from a button or a typed answer: mark the message, check completion. */
+  private async markAskAnswered(
+    chatId: number,
+    pending: TgPendingAsk,
+    index: number,
+    selected: string[],
+    custom?: string,
+  ): Promise<void> {
+    const messageId = pending.messageIds[index]
+    const edit = this.client.editMessageText
+    if (messageId === undefined || !edit) return
+    const prefix = pending.questions.length > 1 ? `Q${index + 1}. ` : ''
+    const answer = custom !== undefined ? custom : selected.join(', ')
+    try {
+      await edit.call(
+        this.client,
+        chatId,
+        messageId,
+        `✅ ${prefix}${pending.questions[index]?.question ?? ''}\nОтвет: ${answer}`,
+        undefined,
+        null,
+      )
+    } catch (err) {
+      this.ctx.logger.warn(`dsh-telegram-channel: ask edit failed: ${this.redact(err)}`)
+    }
+  }
+
+  private async refreshAskKeyboard(chatId: number, pending: TgPendingAsk, index: number): Promise<void> {
+    const messageId = pending.messageIds[index]
+    const keyboard = this.askKeyboard(pending, index)
+    const edit = this.client.editMessageReplyMarkup
+    if (messageId === undefined || !edit || !keyboard) return
+    try {
+      await edit.call(this.client, chatId, messageId, keyboard)
+    } catch (err) {
+      this.ctx.logger.warn(`dsh-telegram-channel: ask keyboard edit failed: ${this.redact(err)}`)
+    }
+  }
+
+  /** Drop inline keyboards that can no longer be used (answered in Web, /cancel, abort). */
+  private clearAskKeyboards(chatId: number, pending: TgPendingAsk): void {
+    const edit = this.client.editMessageReplyMarkup
+    if (!edit) return
+    for (const messageId of pending.messageIds) {
+      if (messageId === undefined) continue
+      void edit.call(this.client, chatId, messageId, null).catch(() => {})
+    }
+  }
+
+  private async maybeResolveAsk(chatId: number, pending: TgPendingAsk): Promise<void> {
+    if (pending.ask.answered) return
+    if (!pending.questions.every((_, i) => pending.final[i])) return
+    pending.ask.answered = true
+    for (const [cid, p] of [...this.pendingAsks]) {
+      if (p.ask !== pending.ask) continue
+      this.pendingAsks.delete(cid)
+      if (cid !== String(chatId)) this.clearAskKeyboards(Number(cid), p)
+    }
+    const answers = pending.questions.map((q, i) => {
+      const custom = pending.custom[i]
+      if (custom !== undefined) return { id: q.id, selected: [], custom }
+      return { id: q.id, selected: pending.selected[i] ?? [] }
     })
-    return lines.join('\n')
+    pending.ask.resolve({ answers })
+    await this.enqueueNotice(chatId, MSG.ASK_ANSWERED)
+  }
+
+  private async handleAskCallback(chatId: number, callbackId: string, data: string): Promise<void> {
+    const pending = this.pendingAsks.get(String(chatId))
+    if (!pending || pending.ask.answered) {
+      await this.client.answerCallbackQuery(callbackId, MSG.ASK_CLOSED)
+      return
+    }
+    const rest = data.slice(ASK_CB.length)
+    const sep = rest.indexOf(':')
+    const index = Number(sep >= 0 ? rest.slice(0, sep) : rest)
+    const action = sep >= 0 ? rest.slice(sep + 1) : ''
+    const question = Number.isInteger(index) ? pending.questions[index] : undefined
+    if (!question) {
+      await this.client.answerCallbackQuery(callbackId, MSG.ASK_CLOSED)
+      return
+    }
+    if (pending.final[index]) {
+      await this.client.answerCallbackQuery(callbackId, MSG.ASK_ALREADY)
+      return
+    }
+    if (action === 'c') {
+      pending.awaitingCustom = index
+      await this.client.answerCallbackQuery(callbackId, 'Жду текст')
+      await this.enqueueNotice(chatId, MSG.ASK_CUSTOM_PROMPT(index + 1))
+      return
+    }
+    if (action === 'd') {
+      const chosen = pending.selected[index] ?? []
+      if (chosen.length === 0) {
+        await this.client.answerCallbackQuery(callbackId, MSG.ASK_NONE_SELECTED)
+        return
+      }
+      pending.final[index] = true
+      await this.client.answerCallbackQuery(callbackId, '✅ Готово')
+      await this.markAskAnswered(chatId, pending, index, chosen)
+      await this.maybeResolveAsk(chatId, pending)
+      return
+    }
+    const options = Array.isArray(question.options) ? question.options : []
+    const option = options[Number(action)]
+    if (!option) {
+      await this.client.answerCallbackQuery(callbackId, 'Вариант устарел')
+      return
+    }
+    if (question.multiSelect) {
+      const chosen = pending.selected[index] ?? []
+      pending.selected[index] = chosen.includes(option.label)
+        ? chosen.filter((label) => label !== option.label)
+        : [...chosen, option.label]
+      await this.refreshAskKeyboard(chatId, pending, index)
+      const now = pending.selected[index]!.length
+      await this.client.answerCallbackQuery(callbackId, now > 0 ? `Выбрано: ${now} — «✅ Готово»` : 'Снято всё')
+      return
+    }
+    pending.selected[index] = [option.label]
+    pending.final[index] = true
+    pending.awaitingCustom = undefined
+    await this.client.answerCallbackQuery(callbackId, `✅ ${option.label}`)
+    await this.markAskAnswered(chatId, pending, index, [option.label])
+    await this.maybeResolveAsk(chatId, pending)
+  }
+
+  /** Text typed after «✏️ Свой ответ» answers exactly that question. */
+  private async handleAskCustomText(chatId: number, pending: TgPendingAsk, text: string): Promise<void> {
+    const index = pending.awaitingCustom
+    if (index === undefined) return
+    const cleaned = text.trim()
+    if (!cleaned) {
+      await this.enqueueNotice(chatId, MSG.ASK_CUSTOM_PROMPT(index + 1))
+      return
+    }
+    pending.awaitingCustom = undefined
+    if (pending.final[index]) {
+      await this.enqueueNotice(chatId, MSG.ASK_ALREADY)
+      return
+    }
+    pending.custom[index] = cleaned
+    pending.selected[index] = []
+    pending.final[index] = true
+    await this.markAskAnswered(chatId, pending, index, [], cleaned)
+    await this.maybeResolveAsk(chatId, pending)
   }
 
   private async handleTgAnswer(chatId: number, pending: TgPendingAsk, text: string): Promise<void> {
@@ -2365,11 +2606,14 @@ export class TelegramBridge {
       }
     }
     ask.answered = true
-    for (const [cid, p] of this.pendingAsks) {
-      if (p.ask === ask) this.pendingAsks.delete(cid)
+    for (const [cid, p] of [...this.pendingAsks]) {
+      if (p.ask !== ask) continue
+      this.pendingAsks.delete(cid)
+      if (cid !== String(chatId)) this.clearAskKeyboards(Number(cid), p)
     }
+    this.clearAskKeyboards(chatId, pending)
     ask.resolve({ answers })
-    this.enqueueNotice(chatId, 'Ответ отправлен')
+    await this.enqueueNotice(chatId, MSG.ASK_ANSWERED)
   }
 
   // ── approval: TG answering via dual-path race on the request waterfall ──
@@ -2391,7 +2635,9 @@ export class TelegramBridge {
     const ask: TgAnswerHandle = { resolve: resolveFn, reject: rejectFn, answered: false }
     const onAbort = (): void => {
       for (const [chatId, p] of this.pendingApprovalsTG) {
-        if (p.ask === ask) this.pendingApprovalsTG.delete(chatId)
+        if (p.ask !== ask) continue
+        this.pendingApprovalsTG.delete(chatId)
+        this.clearApprovalKeyboard(Number(chatId), p)
       }
       rejectFn(new Error('approval withdrawn'))
     }
@@ -2404,8 +2650,24 @@ export class TelegramBridge {
       const toolName = String(req?.toolName ?? 'tool')
       const reason = req?.reason ? String(req.reason).slice(0, 200) : ''
       for (const chatId of targets) {
-        this.pendingApprovalsTG.set(chatId, { toolName, ask })
-        this.enqueueNotice(Number(chatId), `Запрос разрешения: ${toolName}${reason ? `\n(${reason})` : ''}\nОтветьте [A] — разрешить один раз / [B] — отклонить (/cancel — закрыть в TG)`)
+        let messageId: number | undefined
+        try {
+          const message = await this.client.sendMessage(
+            Number(chatId),
+            `🔐 ${MSG.APPROVAL_HEADER}: ${toolName}${reason ? `\n(${reason})` : ''}\n${MSG.APPROVAL_TIP}`,
+            undefined,
+            {
+              inline_keyboard: [[
+                { text: MSG.APPROVAL_ALLOW_BUTTON, callback_data: `${APPROVAL_CB}1` },
+                { text: MSG.APPROVAL_DENY_BUTTON, callback_data: `${APPROVAL_CB}0` },
+              ]],
+            },
+          )
+          messageId = message?.message_id
+        } catch (err) {
+          this.ctx.logger.warn(`dsh-telegram-channel: approval prompt failed: ${this.redact(err)}`)
+        }
+        this.pendingApprovalsTG.set(chatId, { toolName, ask, messageId })
       }
     }
     // No bound TG chat: promise never settles — the UI remains the only answer path.
@@ -2414,6 +2676,7 @@ export class TelegramBridge {
       for (const [chatId, p] of [...this.pendingApprovalsTG]) {
         if (p.ask !== ask) continue
         this.pendingApprovalsTG.delete(chatId)
+        this.clearApprovalKeyboard(Number(chatId), p)
         if (!p.ask.answered) {
           p.ask.reject(new Error('superseded-by-gui'))
           this.enqueueNotice(Number(chatId), 'Это разрешение уже обработано в Web')
@@ -2421,7 +2684,9 @@ export class TelegramBridge {
       }
     }, () => {
       for (const [chatId, p] of [...this.pendingApprovalsTG]) {
-        if (p.ask === ask) this.pendingApprovalsTG.delete(chatId)
+        if (p.ask !== ask) continue
+        this.pendingApprovalsTG.delete(chatId)
+        this.clearApprovalKeyboard(Number(chatId), p)
       }
     })
     return Promise.race([promise, gui]) as Promise<string>
@@ -2434,16 +2699,48 @@ export class TelegramBridge {
       for (const [cid, p] of this.pendingApprovalsTG) {
         if (p.ask === approval.ask) this.pendingApprovalsTG.delete(cid)
       }
+      this.clearApprovalKeyboard(chatId, approval)
       if (cleaned === 'A') {
         approval.ask.resolve('allowed-once')
-        await this.enqueueNotice(chatId, `Разрешён один запуск: ${approval.toolName}`)
+        await this.enqueueNotice(chatId, MSG.APPROVAL_ALLOWED(approval.toolName))
       } else {
         approval.ask.resolve('rejected')
-        await this.enqueueNotice(chatId, 'Запуск инструмента отклонён')
+        await this.enqueueNotice(chatId, MSG.APPROVAL_REJECTED)
       }
       return
     }
-    await this.enqueueNotice(chatId, 'Ответьте [A] — разрешить один раз или [B] — отклонить (/cancel — закрыть)')
+    await this.enqueueNotice(chatId, MSG.APPROVAL_TIP)
+  }
+
+  private clearApprovalKeyboard(chatId: number, pending: TgPendingApproval): void {
+    const edit = this.client.editMessageReplyMarkup
+    if (pending.messageId === undefined || !edit) return
+    void edit.call(this.client, chatId, pending.messageId, null).catch(() => {})
+  }
+
+  private async handleApprovalCallback(chatId: number, callbackId: string, data: string): Promise<void> {
+    const pending = this.pendingApprovalsTG.get(String(chatId))
+    if (!pending || pending.ask.answered) {
+      await this.client.answerCallbackQuery(callbackId, MSG.APPROVAL_CLOSED)
+      return
+    }
+    const allow = data.slice(APPROVAL_CB.length) === '1'
+    pending.ask.answered = true
+    for (const [cid, p] of [...this.pendingApprovalsTG]) {
+      if (p.ask !== pending.ask) continue
+      this.pendingApprovalsTG.delete(cid)
+      if (cid !== String(chatId)) this.clearApprovalKeyboard(Number(cid), p)
+    }
+    this.clearApprovalKeyboard(chatId, pending)
+    if (allow) {
+      pending.ask.resolve('allowed-once')
+      await this.client.answerCallbackQuery(callbackId, '✅ Разрешено')
+      await this.enqueueNotice(chatId, MSG.APPROVAL_ALLOWED(pending.toolName))
+    } else {
+      pending.ask.resolve('rejected')
+      await this.client.answerCallbackQuery(callbackId, '⛔ Отклонено')
+      await this.enqueueNotice(chatId, MSG.APPROVAL_REJECTED)
+    }
   }
 
   // ── /stop /mission /new commands ──

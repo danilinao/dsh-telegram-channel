@@ -85,6 +85,10 @@ export interface TelegramClientLike {
     getChat?(chatId: number | string): Promise<TelegramChatInfo>;
     getUpdates(offset?: number, signal?: AbortSignal): Promise<TelegramUpdate[]>;
     sendMessage(chatId: number, text: string, parseMode?: string, replyMarkup?: InlineKeyboardMarkup): Promise<TelegramMessage>;
+    /** Rewrite a sent message (used to mark an answered question). */
+    editMessageText?(chatId: number, messageId: number, text: string, parseMode?: string, replyMarkup?: InlineKeyboardMarkup | null): Promise<TelegramMessage | boolean>;
+    /** Replace/remove the inline keyboard of a sent message. */
+    editMessageReplyMarkup?(chatId: number, messageId: number, replyMarkup?: InlineKeyboardMarkup | null): Promise<boolean>;
     sendRichMessage(chatId: number, markdown: string): Promise<TelegramMessage>;
     sendChatAction(chatId: number, action: string): Promise<boolean>;
     answerCallbackQuery(callbackQueryId: string, text?: string): Promise<boolean>;
@@ -110,6 +114,8 @@ export declare class TelegramClient implements TelegramClientLike {
     getChat(chatId: number | string): Promise<TelegramChatInfo>;
     getUpdates(offset?: number, signal?: AbortSignal): Promise<TelegramUpdate[]>;
     sendMessage(chatId: number, text: string, parseMode?: string, replyMarkup?: InlineKeyboardMarkup): Promise<TelegramMessage>;
+    editMessageText(chatId: number, messageId: number, text: string, parseMode?: string, replyMarkup?: InlineKeyboardMarkup | null): Promise<TelegramMessage | boolean>;
+    editMessageReplyMarkup(chatId: number, messageId: number, replyMarkup?: InlineKeyboardMarkup | null): Promise<boolean>;
     sendRichMessage(chatId: number, markdown: string): Promise<TelegramMessage>;
     sendChatAction(chatId: number, action: string): Promise<boolean>;
     answerCallbackQuery(callbackQueryId: string, text?: string): Promise<boolean>;

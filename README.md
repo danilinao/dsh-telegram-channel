@@ -42,8 +42,11 @@ Telegram-пульт для **DeepSeek Harness**: телефон подключа
 - **Не только текст.** Картинки (png/jpeg/webp/gif, в том числе с подписью;
   альбомы склеиваются в одно сообщение).
 - **Двусторонние вопросы и подтверждения.** Когда агент спрашивает «какой
-  вариант?» или просит разрешение на инструмент, ответить можно из Telegram;
-  ответ из Web закрывает канал в TG.
+  вариант?» или просит разрешение на инструмент, ответить можно из Telegram:
+  варианты приходят **inline-кнопками**, есть «✏️ Свой ответ» для свободного
+  текста и «✅ Готово» для мультивыбора; разрешение — кнопками
+  «✅ Разрешить» / «⛔ Отклонить». Буквы (`A`, `B`) и обычный текст тоже
+  принимаются; ответ из Web закрывает канал в TG.
 - **Модель, контекст, сжатие.** `/model`, `/status`, `/compact`, `/mission`,
   `/stop`, `/new` — из телефона.
 - **Проекты и сессии целиком с телефона.** В списке видны все рабочие области,
@@ -286,8 +289,11 @@ sync/publish workflow.
   (`<blockquote expandable>`) that open with one tap. `/reasoning off` silences
   the reasoning for one chat.
 - **Two-way questions and approvals.** When the agent asks a multiple-choice
-  question or requests permission for a tool, you can answer from Telegram; an
-  answer given in the web UI closes the Telegram channel for that request.
+  question or requests permission for a tool, you can answer from Telegram:
+  options arrive as **inline buttons**, alongside «✏️ Свой ответ» for free-form
+  text and «✅ Готово» for multi-select; approvals get
+  «✅ Разрешить» / «⛔ Отклонить» buttons. Letters (`A`, `B`) and plain text
+  still work. An answer given in the web UI closes the Telegram channel.
 - **Model, context and compaction from the phone.** `/model`, `/status`,
   `/compact`, `/mission`, `/stop`, `/new`.
 - **Projects and sessions, fully managed from the phone.** The workspace list
